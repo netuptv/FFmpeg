@@ -71,6 +71,14 @@
 #define UDP_MAX_PKT_SIZE 65536
 #define UDP_HEADER_SIZE 8
 
+typedef struct UDPpkt {
+   uint8_t *buf;
+   int size;
+   int64_t time;
+   int64_t time2send;
+   struct UDPpkt * next;
+} UDPpkt;
+
 typedef struct UDPContext {
     const AVClass *class;
     int udp_fd;
@@ -104,7 +112,18 @@ typedef struct UDPContext {
     struct sockaddr_storage local_addr_storage;
     char *sources;
     char *block;
+
+    struct UDPpkt * head;
+    struct UDPpkt * tail;
+    int64_t count;
+    pthread_mutex_t lock;
+    pthread_t tid;
+    int exit;
 } UDPContext;
+
+void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct UDPpkt *pkt);
+void* do_udp_send_thr(void *arg);
+static int udp_send(URLContext *h, const uint8_t *buf, int size);
 
 #define OFFSET(x) offsetof(UDPContext, x)
 #define D AV_OPT_FLAG_DECODING_PARAM
@@ -570,12 +589,25 @@ static int udp_open(URLContext *h, const char *uri, int flags)
     socklen_t len;
     int i, num_include_sources = 0, num_exclude_sources = 0;
     char *include_sources[32], *exclude_sources[32];
+    int err = 0;
 
     h->is_streamed = 1;
 
     is_output = !(flags & AVIO_FLAG_READ);
     if (s->buffer_size < 0)
         s->buffer_size = is_output ? UDP_TX_BUF_SIZE : UDP_MAX_PKT_SIZE;
+
+	pthread_mutex_init(&s->lock, NULL);
+	s->head = NULL;
+	s->tail = NULL;
+	s->exit = 0;
+	s->count = 0;
+
+	err = pthread_create(&s->tid, NULL, &do_udp_send_thr, h);
+	if (err != 0){
+		av_log(h, AV_LOG_ERROR, "Can't create UDP equalizer thread !\n");
+		goto fail;
+	}
 
     if (s->sources) {
         if (parse_source_list(s->sources, include_sources,
@@ -923,7 +955,135 @@ static int udp_read(URLContext *h, uint8_t *buf, int size)
     return ret < 0 ? ff_neterrno() : ret;
 }
 
+void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct UDPpkt *pkt){
+    pkt->next = 0; /* this is last entry */
+    av_log(NULL, AV_LOG_DEBUG, "llist:udp::add: pkts_head/tail/pkt=%p/%p/%p \n", pkts_head, pkts_tail, pkt );
+
+    if(*pkts_head == NULL){
+        *pkts_head = pkt;
+        *pkts_tail = pkt;
+        return;
+    }
+
+    (*pkts_tail)->next = pkt;
+    *pkts_tail = pkt;
+}
+
+
+
+/* netup: udp send equalizer */
+#define UDP_EQ_INTERVAL 1000000
+
+void* do_udp_send_thr(void *arg)
+{
+	URLContext *h = (URLContext *)arg;
+    UDPContext *s = h->priv_data;
+	struct UDPpkt * head;
+	// struct UDPpkt * tail;
+	struct UDPpkt * pkt;
+	struct UDPpkt * pkt2del;
+	int64_t count = 0;
+	int64_t delta = 0;
+	int64_t start_time = av_gettime();
+	int64_t next_time = 0;
+	int64_t wake_time = 0;
+	int64_t counter = 0;
+	int64_t pkt_counter = 0;
+	int need2sleep = 0;
+
+	av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer thread started\n", s);
+	while(!s->exit){
+		counter++;
+		wake_time = start_time + UDP_EQ_INTERVAL * counter;
+		next_time = wake_time + UDP_EQ_INTERVAL;
+
+		need2sleep = wake_time - av_gettime();
+		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time=%lld (need2sleep=%lld)\n", s, wake_time, need2sleep );
+		if( need2sleep < 2*UDP_EQ_INTERVAL && need2sleep > 0 )
+			usleep( need2sleep );
+	
+		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time usleep done. try pthread_mutex_lock \n");
+		pthread_mutex_lock(&s->lock);
+		head = s->head;
+		// tail = s->tail;
+		count = s->count;
+		s->head = NULL;
+		s->tail = NULL;
+		s->count = 0;
+		pthread_mutex_unlock(&s->lock);
+
+		// av_log(NULL, AV_LOG_DEBUG, "[%p] udp:equalizer:thread counter=%lld pkts count=%lld \n", s, counter, count );
+		if(count <= 0)
+			continue;
+
+		// av_log(NULL, AV_LOG_DEBUG, "[%p] udp:equalizer:thread next_time=%lld count=%lld \n", s, next_time, count  );
+
+		/* calculate time to send */
+		delta = UDP_EQ_INTERVAL/count;
+        // av_log(NULL, AV_LOG_DEBUG, "[%p] udp:delta=%lld next-tail=%lld next-head=%lld usecs count=%d\n", s, delta, next_time - tail->time, next_time - head->time, count );
+
+		pkt = head;
+		pkt_counter = 0;
+		while(pkt){
+			pkt->time2send = wake_time + pkt_counter * delta;
+			if(pkt->time2send > next_time)
+				pkt->time2send = next_time;
+
+			pkt = pkt->next;
+			pkt_counter++;
+		}
+
+		/* do real send */
+		pkt_counter = 0;
+		pkt = head;
+		while(pkt){
+			// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread processing pkt->time2send=%lld need_sleep=%lld \n", s, pkt->time2send, pkt->time2send - av_gettime()  );
+			need2sleep = pkt->time2send - av_gettime();
+			if( pkt->time2send < next_time && need2sleep > 0 )
+				usleep( need2sleep );
+
+			udp_send(h, pkt->buf, pkt->size);
+			pkt2del = pkt;
+			pkt = pkt->next;
+
+			free(pkt2del->buf);
+			free(pkt2del);
+			pkt_counter++;
+		}
+		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread %lld packets processed \n", s, pkt_counter );
+	}
+	av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer thread done \n", s);
+
+	return 0;
+}
+
+
+
 static int udp_write(URLContext *h, const uint8_t *buf, int size)
+{   
+    UDPContext *s = h->priv_data;
+    struct UDPpkt *pkt = (struct UDPpkt *)malloc(sizeof(struct UDPpkt));
+    if(!pkt)
+        return -1;
+    pkt->buf = (uint8_t *)malloc(size);
+    if(!pkt->buf)
+        return -1;
+
+    memcpy(pkt->buf, buf, size);
+    pkt->size = size;
+    pkt->time = av_gettime();
+
+    /* save to queue */
+    pthread_mutex_lock(&s->lock);
+    llist_udp_add(&s->head, &s->tail, pkt);
+    s->count++;
+    av_log(NULL, AV_LOG_DEBUG, "[%p] udp:list count=%lld \n", s, s->count );
+    pthread_mutex_unlock(&s->lock);
+
+    return 0;
+}
+
+static int udp_send(URLContext *h, const uint8_t *buf, int size)
 {
     UDPContext *s = h->priv_data;
     int ret;
@@ -947,6 +1107,28 @@ static int udp_write(URLContext *h, const uint8_t *buf, int size)
 static int udp_close(URLContext *h)
 {
     UDPContext *s = h->priv_data;
+
+	struct UDPpkt *pkt;
+	struct UDPpkt *pkt2del;
+	struct UDPpkt * head;
+
+	/* stop udp equalizer thread */
+	s->exit = 1;
+	pthread_join(s->tid, NULL);
+
+	/* clean allocated buffers */
+	head = s->head;
+	if(s->count > 0){
+		pkt = head;
+		while(pkt){
+			pkt2del = pkt;
+			free(pkt->buf);
+			pkt = pkt->next;
+			free(pkt2del);
+		}
+	}
+
+
 
     if (s->is_multicast && (h->flags & AVIO_FLAG_READ))
         udp_leave_multicast_group(s->udp_fd, (struct sockaddr *)&s->dest_addr,(struct sockaddr *)&s->local_addr_storage);
