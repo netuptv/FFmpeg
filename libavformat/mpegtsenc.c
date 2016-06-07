@@ -881,18 +881,17 @@ static void mpegts_insert_null_packet(AVFormatContext *s)
 }
 
 /* Write a single transport stream packet with a PCR and no payload */
-static void mpegts_insert_pcr_only(AVFormatContext *s, AVStream *st)
+static void mpegts_insert_pcr_only(AVFormatContext *s, int pcr_pid, int pcr_cc)
 {
     MpegTSWrite *ts = s->priv_data;
-    MpegTSWriteStream *ts_st = st->priv_data;
     uint8_t *q;
     uint8_t buf[TS_PACKET_SIZE];
 
     q    = buf;
     *q++ = 0x47;
-    *q++ = ts_st->pid >> 8;
-    *q++ = ts_st->pid;
-    *q++ = 0x20 | ts_st->cc;   /* Adaptation only */
+    *q++ = pcr_pid >> 8;
+    *q++ = pcr_pid;
+    *q++ = 0x20 | pcr_cc;   /* Adaptation only */
     /* Continuity Count field does not increment (see 13818-1 section 2.4.3.3) */
     *q++ = TS_PACKET_SIZE - 5; /* Adaptation Field Length */
     *q++ = 0x10;               /* Adaptation flags: PCR present */
@@ -970,6 +969,14 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
     int force_pat = st->codec->codec_type == AVMEDIA_TYPE_VIDEO && key && !ts_st->prev_payload_key;
+    int i;
+    MpegTSWriteStream *pcr_st = 0;
+    for (i = 0; i < s->nb_streams; i++) {
+        MpegTSWriteStream *st1 = s->streams[i]->priv_data;
+        if (st1->pid == ts_st->service->pcr_pid) {
+            pcr_st = st1;
+        }
+    }
 
     is_start = 1;
     while (payload_size > 0) {
@@ -977,21 +984,20 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         force_pat = 0;
 
         write_pcr = 0;
-        if (ts_st->pid == ts_st->service->pcr_pid) {
-            if (ts->mux_rate > 1 || is_start) // VBR pcr period is based on frames
-                ts_st->service->pcr_packet_count++;
-            if (ts_st->service->pcr_packet_count >=
-                ts_st->service->pcr_packet_period) {
-                ts_st->service->pcr_packet_count = 0;
-                write_pcr = 1;
-            }
+        if (ts->mux_rate > 1 || (is_start && ts_st->pid == ts_st->service->pcr_pid ) ) // VBR pcr period is based on frames
+            ts_st->service->pcr_packet_count++;
+        if (ts_st->service->pcr_packet_count >=
+            ts_st->service->pcr_packet_period) {
+            ts_st->service->pcr_packet_count = 0;
+            write_pcr = 1;
         }
 
-        if (ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
+        if (is_start && ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
             (dts - get_pcr(ts, s->pb) / 300) > delay) {
             /* pcr insert gets priority over null packet insert */
-            if (write_pcr)
-                mpegts_insert_pcr_only(s, st);
+
+            if (write_pcr && pcr_st)
+                mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
             else
                 mpegts_insert_null_packet(s);
             /* recalculate write_pcr and possibly retransmit si_info */
@@ -1016,17 +1022,21 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             q = get_ts_payload_start(buf);
         }
         if (write_pcr) {
-            set_af_flag(buf, 0x10);
-            q = get_ts_payload_start(buf);
-            // add 11, pcr references the last byte of program clock reference base
-            if (ts->mux_rate > 1)
-                pcr = get_pcr(ts, s->pb);
-            else
-                pcr = (dts - delay) * 300;
-            if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
-                av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
-            extend_af(buf, write_pcr_bits(q, pcr));
-            q = get_ts_payload_start(buf);
+            if (ts_st->pid == ts_st->service->pcr_pid) {
+                set_af_flag(buf, 0x10);
+                q = get_ts_payload_start(buf);
+                // add 11, pcr references the last byte of program clock reference base
+                if (ts->mux_rate > 1)
+                    pcr = get_pcr(ts, s->pb);
+                else
+                    pcr = (dts - delay) * 300;
+                if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
+                    av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
+                extend_af(buf, write_pcr_bits(q, pcr));
+                q = get_ts_payload_start(buf);
+            } else if (pcr_st) {
+                mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
+            }
         }
         if (is_start) {
             int pes_extension = 0;
