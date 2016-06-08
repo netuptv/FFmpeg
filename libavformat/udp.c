@@ -957,7 +957,7 @@ static int udp_read(URLContext *h, uint8_t *buf, int size)
 
 void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct UDPpkt *pkt){
     pkt->next = 0; /* this is last entry */
-    av_log(NULL, AV_LOG_DEBUG, "llist:udp::add: pkts_head/tail/pkt=%p/%p/%p \n", pkts_head, pkts_tail, pkt );
+    //av_log(NULL, AV_LOG_DEBUG, "llist:udp::add: pkts_head/tail/pkt=%p/%p/%p \n", pkts_head, pkts_tail, pkt );
 
     if(*pkts_head == NULL){
         *pkts_head = pkt;
@@ -991,7 +991,7 @@ void* do_udp_send_thr(void *arg)
 	int64_t pkt_counter = 0;
 	int need2sleep = 0;
 
-	av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer thread started\n", s);
+	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread started\n", s);
 	while(!s->exit){
 		counter++;
 		wake_time = start_time + UDP_EQ_INTERVAL * counter;
@@ -1052,7 +1052,7 @@ void* do_udp_send_thr(void *arg)
 		}
 		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread %lld packets processed \n", s, pkt_counter );
 	}
-	av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer thread done \n", s);
+	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread done \n", s);
 
 	return 0;
 }
@@ -1077,7 +1077,7 @@ static int udp_write(URLContext *h, const uint8_t *buf, int size)
     pthread_mutex_lock(&s->lock);
     llist_udp_add(&s->head, &s->tail, pkt);
     s->count++;
-    av_log(NULL, AV_LOG_DEBUG, "[%p] udp:list count=%lld \n", s, s->count );
+    //av_log(NULL, AV_LOG_DEBUG, "[%p] udp:list count=%lld \n", s, s->count );
     pthread_mutex_unlock(&s->lock);
 
     return 0;
