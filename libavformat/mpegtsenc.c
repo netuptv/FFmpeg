@@ -994,6 +994,10 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
 
         if (is_start && ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
             (dts - get_pcr(ts, s->pb) / 300) > delay) {
+            if ((dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
+                av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - dts-pcr diff too large (%ld msec), resyncing PCR\n", (dts - get_pcr(ts, s->pb)/300)/90);
+                ts->first_pcr += dts*300 - get_pcr(ts, s->pb);
+            }
             /* pcr insert gets priority over null packet insert */
 
             if (write_pcr && pcr_st)
