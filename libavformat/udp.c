@@ -972,7 +972,7 @@ void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct 
 
 
 /* netup: udp send equalizer */
-#define UDP_EQ_INTERVAL 1000000
+#define UDP_EQ_INTERVAL 5000000
 
 void* do_udp_send_thr(void *arg)
 {
