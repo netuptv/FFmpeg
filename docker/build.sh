@@ -15,7 +15,7 @@ mkdir -p ${OUT_DIR} ${CCACHE_DIR}
 
 docker run --rm \
     --volume ${SRC_DIR}:/mnt/src \
-    --volume ${OUT_DIR}:/mnt/out \
+    --volume ${OUT_DIR}:/opt/ffmpeg \
     --volume ${CCACHE_DIR}:/mnt/ccache \
     --user ${UID} \
     -t \

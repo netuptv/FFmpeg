@@ -4,7 +4,7 @@ set -ex
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 SRC_DIR=$(cd ${SCRIPT_DIR}/../..; pwd)
-OUT_DIR=/mnt/out/
+OUT_DIR=/opt/ffmpeg
 CCACHE_DIR=/mnt/ccache
 
 cd ${SRC_DIR}
