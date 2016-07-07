@@ -6,6 +6,10 @@ TARGET=ffmpeg
 SCRIPT_DIR=$(cd $(dirname ${0}); pwd)
 SRC_DIR=${SCRIPT_DIR}/..
 REVISION=$(cd ${SRC_DIR}; git rev-parse HEAD)
+if [ "${JENKINS_HOME}" ]; then
+    mkdir -p jenkins
+    cd jenkins
+fi
 OUT_DIR=$(pwd)/out/${TARGET}
 CCACHE_DIR=$(pwd)/ccache/${TARGET}
 IMAGE_TAG=$(head -n 1 ${SCRIPT_DIR}/build.tag)
