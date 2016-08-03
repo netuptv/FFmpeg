@@ -14,4 +14,4 @@ export CCACHE_DIR
 
 ./configure --prefix=${OUT_DIR}
 make -j $(nproc)
-make install
+make install-libs install-headers
