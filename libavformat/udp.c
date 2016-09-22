@@ -609,6 +609,8 @@ static int udp_open(URLContext *h, const char *uri, int flags)
             av_log(h, AV_LOG_ERROR, "Can't create UDP equalizer thread !\n");
             goto fail;
         }
+    } else {
+        s->tid = 0;
     }
 
     if (s->sources) {
@@ -1116,7 +1118,9 @@ static int udp_close(URLContext *h)
 
 	/* stop udp equalizer thread */
 	s->exit = 1;
-	pthread_join(s->tid, NULL);
+	if (s->tid) {
+		pthread_join(s->tid, NULL);
+	}
 
 	/* clean allocated buffers */
 	head = s->head;
