@@ -603,11 +603,13 @@ static int udp_open(URLContext *h, const char *uri, int flags)
 	s->exit = 0;
 	s->count = 0;
 
-	err = pthread_create(&s->tid, NULL, &do_udp_send_thr, h);
-	if (err != 0){
-		av_log(h, AV_LOG_ERROR, "Can't create UDP equalizer thread !\n");
-		goto fail;
-	}
+    if (is_output) {
+        err = pthread_create(&s->tid, NULL, &do_udp_send_thr, h);
+        if (err != 0){
+            av_log(h, AV_LOG_ERROR, "Can't create UDP equalizer thread !\n");
+            goto fail;
+        }
+    }
 
     if (s->sources) {
         if (parse_source_list(s->sources, include_sources,
