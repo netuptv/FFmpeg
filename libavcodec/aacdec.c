@@ -50,11 +50,12 @@
 #include "aac.h"
 #include "aactab.h"
 #include "aacdectab.h"
-#include "cbrt_tablegen.h"
+#include "cbrt_data.h"
 #include "sbr.h"
 #include "aacsbr.h"
 #include "mpeg4audio.h"
 #include "aacadtsdec.h"
+#include "profiles.h"
 #include "libavutil/intfloat.h"
 
 #include <errno.h>
@@ -322,14 +323,14 @@ static int latm_decode_audio_specific_config(struct LATMContext *latmctx,
 
         if (avctx->extradata_size < esize) {
             av_free(avctx->extradata);
-            avctx->extradata = av_malloc(esize + FF_INPUT_BUFFER_PADDING_SIZE);
+            avctx->extradata = av_malloc(esize + AV_INPUT_BUFFER_PADDING_SIZE);
             if (!avctx->extradata)
                 return AVERROR(ENOMEM);
         }
 
         avctx->extradata_size = esize;
         memcpy(avctx->extradata, gb->buffer + (config_start_bit/8), esize);
-        memset(avctx->extradata+esize, 0, FF_INPUT_BUFFER_PADDING_SIZE);
+        memset(avctx->extradata+esize, 0, AV_INPUT_BUFFER_PADDING_SIZE);
     }
     skip_bits_long(gb, bits_consumed);
 
@@ -496,7 +497,7 @@ static int latm_decode_frame(AVCodecContext *avctx, void *out,
             push_output_configuration(&latmctx->aac_ctx);
             if ((err = decode_audio_specific_config(
                     &latmctx->aac_ctx, avctx, &latmctx->aac_ctx.oc[1].m4ac,
-                    avctx->extradata, avctx->extradata_size*8, 1)) < 0) {
+                    avctx->extradata, avctx->extradata_size*8LL, 1)) < 0) {
                 pop_output_configuration(&latmctx->aac_ctx);
                 return err;
             }
@@ -550,11 +551,12 @@ AVCodec ff_aac_decoder = {
     .sample_fmts     = (const enum AVSampleFormat[]) {
         AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE
     },
-    .capabilities    = CODEC_CAP_CHANNEL_CONF | CODEC_CAP_DR1,
+    .capabilities    = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
+    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE,
     .channel_layouts = aac_channel_layout,
     .flush = flush,
     .priv_class      = &aac_decoder_class,
-    .profiles        = profiles,
+    .profiles        = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
 };
 
 /*
@@ -574,8 +576,9 @@ AVCodec ff_aac_latm_decoder = {
     .sample_fmts     = (const enum AVSampleFormat[]) {
         AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE
     },
-    .capabilities    = CODEC_CAP_CHANNEL_CONF | CODEC_CAP_DR1,
+    .capabilities    = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
+    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE,
     .channel_layouts = aac_channel_layout,
     .flush = flush,
-    .profiles        = profiles,
+    .profiles        = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
 };

@@ -210,13 +210,13 @@
 %endif
 %endmacro
 
-%macro PSIGNW_MMX 2
+%macro PSIGNW 2
+%if cpuflag(ssse3)
+    psignw     %1, %2
+%else
     pxor       %1, %2
     psubw      %1, %2
-%endmacro
-
-%macro PSIGNW_SSSE3 2
-    psignw     %1, %2
+%endif
 %endmacro
 
 %macro ABS1 2
@@ -354,6 +354,17 @@
 %else
     pmaddwd %1, [pw_1]
     HADDD   %1, %2
+%endif
+%endmacro
+
+%macro HADDPS 3 ; dst, src, tmp
+%if cpuflag(sse3)
+    haddps  %1, %1, %2
+%else
+    movaps  %3, %1
+    shufps  %1, %2, q2020
+    shufps  %3, %2, q3131
+    addps   %1, %3
 %endif
 %endmacro
 
@@ -764,25 +775,6 @@
     psrad        %1, 16
 %endif
 %endmacro
-
-%macro PMA_EMU 4
-    %macro %1 5-8 %2, %3, %4
-        %if cpuflag(xop)
-            v%6 %1, %2, %3, %4
-        %elifidn %1, %4
-            %7 %5, %2, %3
-            %8 %1, %4, %5
-        %else
-            %7 %1, %2, %3
-            %8 %1, %4
-        %endif
-    %endmacro
-%endmacro
-
-PMA_EMU  PMACSWW,  pmacsww,  pmullw, paddw
-PMA_EMU  PMACSDD,  pmacsdd,  pmulld, paddd ; sse4 emulation
-PMA_EMU PMACSDQL, pmacsdql,  pmuldq, paddq ; sse4 emulation
-PMA_EMU PMADCSWD, pmadcswd, pmaddwd, paddd
 
 ; Wrapper for non-FMA version of fmaddps
 %macro FMULADD_PS 5

@@ -1240,7 +1240,7 @@ static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame, AVPac
 }
 
 /**
- * Caclulate quantization tables for version b
+ * Calculate quantization tables for version b
  */
 static av_cold void binkb_calc_quant(void)
 {
@@ -1354,5 +1354,5 @@ AVCodec ff_bink_decoder = {
     .close          = decode_end,
     .decode         = decode_frame,
     .flush          = flush,
-    .capabilities   = CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1,
 };
