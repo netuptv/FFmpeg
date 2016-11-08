@@ -1,17 +1,17 @@
 #!/bin/sh
 
-set -ex
+set -e
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 SRC_DIR=$(cd ${SCRIPT_DIR}/../..; pwd)
 OUT_DIR=/opt/ffmpeg
+BUILD_DIR=/mnt/build
 CCACHE_DIR=/mnt/ccache
 
-cd ${SRC_DIR}
+cd ${BUILD_DIR}
 
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-./configure --prefix=${OUT_DIR} --enable-pic
-make -j $(nproc)
-make install-libs install-headers
+${SRC_DIR}/configure --prefix=${OUT_DIR} --enable-pic
+make -j $(nproc) install-libs install-headers
