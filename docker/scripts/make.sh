@@ -12,6 +12,6 @@ cd ${SRC_DIR}
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-./configure --prefix=${OUT_DIR}
+./configure --prefix=${OUT_DIR} --enable-pic
 make -j $(nproc)
 make install-libs install-headers
