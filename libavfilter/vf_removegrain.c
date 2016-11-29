@@ -2,6 +2,7 @@
  * Copyright (c) 2012 Laurent de Soras
  * Copyright (c) 2013 Fredrik Mellbin
  * Copyright (c) 2015 Paul B Mahol
+ * Copyright (c) 2015 James Darnley
  *
  * This file is part of FFmpeg.
  *
@@ -20,31 +21,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/*
- * TODO: add SIMD
- */
-
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/qsort.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
+#include "removegrain.h"
 #include "video.h"
-
-typedef struct RemoveGrainContext {
-    const AVClass *class;
-
-    int mode[4];
-
-    int nb_planes;
-    int planewidth[4];
-    int planeheight[4];
-    int skip_even;
-    int skip_odd;
-
-    int (*rg[4])(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8);
-} RemoveGrainContext;
 
 #define OFFSET(x) offsetof(RemoveGrainContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
@@ -98,17 +83,16 @@ static int mode01(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
 
 static int cmp_int(const void *p1, const void *p2)
 {
-    int left = *(const int *)p1;
+    int left  = *(const int *)p1;
     int right = *(const int *)p2;
-
-    return ((left > right) - (left < right));
+    return FFDIFFSIGN(left, right);
 }
 
 static int mode02(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8)
 {
     int a[8] = { a1, a2, a3, a4, a5, a6, a7, a8 };
 
-    qsort(&a, 8, sizeof(a[0]), cmp_int);
+    AV_QSORT(a, 8, int, cmp_int);
 
     return av_clip(c, a[2 - 1 ], a[7 - 1]);
 }
@@ -117,7 +101,7 @@ static int mode03(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
 {
     int a[8] = { a1, a2, a3, a4, a5, a6, a7, a8 };
 
-    qsort(&a, 8, sizeof(a[0]), cmp_int);
+    AV_QSORT(a, 8, int, cmp_int);
 
     return av_clip(c, a[3 - 1 ], a[6 - 1]);
 }
@@ -126,7 +110,7 @@ static int mode04(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
 {
     int a[8] = { a1, a2, a3, a4, a5, a6, a7, a8 };
 
-    qsort(&a, 8, sizeof(a[0]), cmp_int);
+    AV_QSORT(a, 8, int, cmp_int);
 
     return av_clip(c, a[4 - 1 ], a[5 - 1]);
 }
@@ -142,6 +126,7 @@ static int mode05(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
 
     const int mindiff = FFMIN(FFMIN(c1, c2), FFMIN(c3, c4));
 
+    /* When adding SIMD notice the return order here: 4, 2, 3, 1. */
     if (mindiff == c4) {
         return av_clip(c, mi4, ma4);
     } else if (mindiff == c2) {
@@ -167,10 +152,10 @@ static int mode06(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
     const int cli3 = av_clip(c, mi3, ma3);
     const int cli4 = av_clip(c, mi4, ma4);
 
-    const int c1 = av_clip_uint8((FFABS(c - cli1) << 1) + d1);
-    const int c2 = av_clip_uint8((FFABS(c - cli2) << 1) + d2);
-    const int c3 = av_clip_uint8((FFABS(c - cli3) << 1) + d3);
-    const int c4 = av_clip_uint8((FFABS(c - cli4) << 1) + d4);
+    const int c1 = av_clip_uint16((FFABS(c - cli1) << 1) + d1);
+    const int c2 = av_clip_uint16((FFABS(c - cli2) << 1) + d2);
+    const int c3 = av_clip_uint16((FFABS(c - cli3) << 1) + d3);
+    const int c4 = av_clip_uint16((FFABS(c - cli4) << 1) + d4);
 
     const int mindiff = FFMIN(FFMIN(c1, c2), FFMIN(c3, c4));
 
@@ -231,10 +216,10 @@ static int mode08(int c, int a1, int a2, int a3, int a4, int a5, int a6, int a7,
     const int cli3 = av_clip(c, mi3, ma3);
     const int cli4 = av_clip(c, mi4, ma4);
 
-    const int c1 = av_clip_uint8(FFABS(c - cli1) + (d1 << 1));
-    const int c2 = av_clip_uint8(FFABS(c - cli2) + (d2 << 1));
-    const int c3 = av_clip_uint8(FFABS(c - cli3) + (d3 << 1));
-    const int c4 = av_clip_uint8(FFABS(c - cli4) + (d4 << 1));
+    const int c1 = av_clip_uint16(FFABS(c - cli1) + (d1 << 1));
+    const int c2 = av_clip_uint16(FFABS(c - cli2) + (d2 << 1));
+    const int c3 = av_clip_uint16(FFABS(c - cli3) + (d3 << 1));
+    const int c4 = av_clip_uint16(FFABS(c - cli4) + (d4 << 1));
 
     const int mindiff = FFMIN(FFMIN(c1, c2), FFMIN(c3, c4));
 
@@ -486,9 +471,9 @@ static int config_input(AVFilterLink *inlink)
 
     s->nb_planes = av_pix_fmt_count_planes(inlink->format);
 
-    s->planeheight[1] = s->planeheight[2] = FF_CEIL_RSHIFT(inlink->h, desc->log2_chroma_h);
+    s->planeheight[1] = s->planeheight[2] = AV_CEIL_RSHIFT(inlink->h, desc->log2_chroma_h);
     s->planeheight[0] = s->planeheight[3] = inlink->h;
-    s->planewidth[1]  = s->planewidth[2]  = FF_CEIL_RSHIFT(inlink->w, desc->log2_chroma_w);
+    s->planewidth[1]  = s->planewidth[2]  = AV_CEIL_RSHIFT(inlink->w, desc->log2_chroma_w);
     s->planewidth[0]  = s->planewidth[3]  = inlink->w;
 
     for (i = 0; i < s->nb_planes; i++) {
@@ -523,6 +508,9 @@ static int config_input(AVFilterLink *inlink)
         case 24: s->rg[i] = mode24;   break;
         }
     }
+
+    if (ARCH_X86)
+        ff_removegrain_init_x86(s);
 
     return 0;
 }
@@ -566,7 +554,19 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
         }
 
         *dst++ = *src++;
-        for (x = 1; x < s->planewidth[i] - 1; x++) {
+
+        if (s->fl[i]) {
+            int w_asm = (s->planewidth[i] - 2) & ~15;
+
+            s->fl[i](dst, src, in->linesize[i], w_asm);
+
+            x = 1 + w_asm;
+            dst += w_asm;
+            src += w_asm;
+        } else
+            x = 1;
+
+        for (; x < s->planewidth[i] - 1; x++) {
             const int a1 = src[-op];
             const int a2 = src[-o0];
             const int a3 = src[-om];
@@ -619,7 +619,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
         td.in = in; td.out = out; td.plane = i;
         ctx->internal->execute(ctx, filter_slice, &td, NULL,
-                               FFMIN(s->planeheight[i], ctx->graph->nb_threads));
+                               FFMIN(s->planeheight[i], ff_filter_get_nb_threads(ctx)));
 
         src = in->data[i] + (s->planeheight[i] - 1) * in->linesize[i];
         dst = out->data[i] + (s->planeheight[i] - 1) * out->linesize[i];

@@ -24,6 +24,9 @@
 #include <stdint.h>
 #include <msa.h>
 
+#define ALIGNMENT           16
+#define ALLOC_ALIGNED(align) __attribute__ ((aligned((align) << 1)))
+
 #define LD_B(RTYPE, psrc) *((RTYPE *)(psrc))
 #define LD_UB(...) LD_B(v16u8, __VA_ARGS__)
 #define LD_SB(...) LD_B(v16i8, __VA_ARGS__)
@@ -82,12 +85,12 @@
     #else  // !(__mips == 64)
         #define LD(psrc)                                              \
         ( {                                                           \
-            uint8_t *psrc_m = (uint8_t *) (psrc);                     \
+            uint8_t *psrc_ld_m = (uint8_t *) (psrc);                  \
             uint32_t val0_m, val1_m;                                  \
             uint64_t val_m = 0;                                       \
                                                                       \
-            val0_m = LW(psrc_m);                                      \
-            val1_m = LW(psrc_m + 4);                                  \
+            val0_m = LW(psrc_ld_m);                                   \
+            val1_m = LW(psrc_ld_m + 4);                               \
                                                                       \
             val_m = (uint64_t) (val1_m);                              \
             val_m = (uint64_t) ((val_m << 32) & 0xFFFFFFFF00000000);  \
@@ -169,12 +172,12 @@
     #else  // !(__mips == 64)
         #define LD(psrc)                                              \
         ( {                                                           \
-            uint8_t *psrc_m1 = (uint8_t *) (psrc);                    \
+            uint8_t *psrc_ld_m = (uint8_t *) (psrc);                  \
             uint32_t val0_m, val1_m;                                  \
             uint64_t val_m = 0;                                       \
                                                                       \
-            val0_m = LW(psrc_m1);                                     \
-            val1_m = LW(psrc_m1 + 4);                                 \
+            val0_m = LW(psrc_ld_m);                                   \
+            val1_m = LW(psrc_ld_m + 4);                               \
                                                                       \
             val_m = (uint64_t) (val1_m);                              \
             val_m = (uint64_t) ((val_m << 32) & 0xFFFFFFFF00000000);  \

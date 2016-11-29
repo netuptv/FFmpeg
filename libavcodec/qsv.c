@@ -85,7 +85,7 @@ int ff_qsv_error(int mfx_err)
         return AVERROR_UNKNOWN;
     }
 }
-static int ff_qsv_set_display_handle(AVCodecContext *avctx, mfxSession session)
+static int ff_qsv_set_display_handle(AVCodecContext *avctx, QSVSession *qs)
 {
     // this code is only required for Linux.  It searches for a valid
     // display handle.  First in /dev/dri/renderD then in /dev/dri/card
@@ -98,6 +98,9 @@ static int ff_qsv_set_display_handle(AVCodecContext *avctx, mfxSession session)
     int fd = -1;
     char adapterpath[256];
     int adapter_num;
+
+    qs->fd_display = -1;
+    qs->va_display = NULL;
 
     //search for valid graphics device
     for (adapter_num = 0;adapter_num < 6;adapter_num++) {
@@ -135,7 +138,9 @@ static int ff_qsv_set_display_handle(AVCodecContext *avctx, mfxSession session)
         } else {
             av_log(avctx, AV_LOG_VERBOSE,
             "mfx initialization: %s vaInitialize successful\n",adapterpath);
-            ret = MFXVideoCORE_SetHandle(session,
+            qs->fd_display = fd;
+            qs->va_display = va_dpy;
+            ret = MFXVideoCORE_SetHandle(qs->session,
                   (mfxHandleType)MFX_HANDLE_VA_DISPLAY, (mfxHDL)va_dpy);
             if (ret < 0) {
                 av_log(avctx, AV_LOG_ERROR,
@@ -163,7 +168,7 @@ static int ff_qsv_set_display_handle(AVCodecContext *avctx, mfxSession session)
  * @param avctx    ffmpeg metadata for this codec context
  * @param session  the MSDK session used
  */
-int ff_qsv_init_internal_session(AVCodecContext *avctx, mfxSession *session,
+int ff_qsv_init_internal_session(AVCodecContext *avctx, QSVSession *qs,
                                  const char *load_plugins)
 {
     mfxIMPL impl   = MFX_IMPL_AUTO_ANY;
@@ -172,31 +177,15 @@ int ff_qsv_init_internal_session(AVCodecContext *avctx, mfxSession *session,
     const char *desc;
     int ret;
 
-    ret = MFXInit(impl, &ver, session);
+    ret = MFXInit(impl, &ver, &qs->session);
     if (ret < 0) {
         av_log(avctx, AV_LOG_ERROR, "Error initializing an internal MFX session\n");
         return ff_qsv_error(ret);
     }
 
-    ret = ff_qsv_set_display_handle(avctx, *session);
+    ret = ff_qsv_set_display_handle(avctx, qs);
     if (ret < 0)
         return ret;
-
-    MFXQueryIMPL(*session, &impl);
-
-    switch (MFX_IMPL_BASETYPE(impl)) {
-    case MFX_IMPL_SOFTWARE:
-        desc = "software";
-        break;
-    case MFX_IMPL_HARDWARE:
-    case MFX_IMPL_HARDWARE2:
-    case MFX_IMPL_HARDWARE3:
-    case MFX_IMPL_HARDWARE4:
-        desc = "hardware accelerated";
-        break;
-    default:
-        desc = "unknown";
-    }
 
     if (load_plugins && *load_plugins) {
         while (*load_plugins) {
@@ -222,7 +211,7 @@ int ff_qsv_init_internal_session(AVCodecContext *avctx, mfxSession *session,
 
             }
 
-            ret = MFXVideoUSER_Load(*session, &uid, 1);
+            ret = MFXVideoUSER_Load(qs->session, &uid, 1);
             if (ret < 0) {
                 av_log(avctx, AV_LOG_ERROR, "Could not load the requested plugin: %s\n",
                        plugin);
@@ -230,6 +219,8 @@ int ff_qsv_init_internal_session(AVCodecContext *avctx, mfxSession *session,
                 goto load_plugin_fail;
             }
 
+            if (*load_plugins)
+                load_plugins++;
 load_plugin_fail:
             av_freep(&plugin);
             if (err < 0)
@@ -237,9 +228,44 @@ load_plugin_fail:
         }
     }
 
+    MFXQueryIMPL(qs->session, &impl);
+
+    switch (MFX_IMPL_BASETYPE(impl)) {
+    case MFX_IMPL_SOFTWARE:
+        desc = "software";
+        break;
+    case MFX_IMPL_HARDWARE:
+    case MFX_IMPL_HARDWARE2:
+    case MFX_IMPL_HARDWARE3:
+    case MFX_IMPL_HARDWARE4:
+        desc = "hardware accelerated";
+        break;
+    default:
+        desc = "unknown";
+    }
+
     av_log(avctx, AV_LOG_VERBOSE,
            "Initialized an internal MFX session using %s implementation\n",
            desc);
 
+    return 0;
+}
+
+int ff_qsv_close_internal_session(QSVSession *qs)
+{
+    if (qs->session) {
+        MFXClose(qs->session);
+        qs->session = NULL;
+    }
+#ifdef AVCODEC_QSV_LINUX_SESSION_HANDLE
+    if (qs->va_display) {
+        vaTerminate(qs->va_display);
+        qs->va_display = NULL;
+    }
+    if (qs->fd_display > 0) {
+        close(qs->fd_display);
+        qs->fd_display = -1;
+    }
+#endif
     return 0;
 }

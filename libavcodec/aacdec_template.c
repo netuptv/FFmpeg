@@ -89,6 +89,8 @@
            Parametric Stereo.
  */
 
+#include "libavutil/thread.h"
+
 static VLC vlc_scalefactors;
 static VLC vlc_spectral[11];
 
@@ -132,7 +134,7 @@ static av_cold int che_configure(AACContext *ac,
         if (!ac->che[type][id]) {
             if (!(ac->che[type][id] = av_mallocz(sizeof(ChannelElement))))
                 return AVERROR(ENOMEM);
-            ff_aac_sbr_ctx_init(ac, &ac->che[type][id]->sbr);
+            AAC_RENAME(ff_aac_sbr_ctx_init)(ac, &ac->che[type][id]->sbr);
         }
         if (type != TYPE_CCE) {
             if (*channels >= MAX_CHANNELS - (type == TYPE_CPE || (type == TYPE_SCE && ac->oc[1].m4ac.ps == 1))) {
@@ -147,7 +149,7 @@ static av_cold int che_configure(AACContext *ac,
         }
     } else {
         if (ac->che[type][id])
-            ff_aac_sbr_ctx_close(&ac->che[type][id]->sbr);
+            AAC_RENAME(ff_aac_sbr_ctx_close)(&ac->che[type][id]->sbr);
         av_freep(&ac->che[type][id]);
     }
     return 0;
@@ -449,6 +451,10 @@ static int output_configure(AACContext *ac,
         int type =         layout_map[i][0];
         int id =           layout_map[i][1];
         id_map[type][id] = type_counts[type]++;
+        if (id_map[type][id] >= MAX_ELEM_ID) {
+            avpriv_request_sample(ac->avctx, "Remapped id too large\n");
+            return AVERROR_PATCHWELCOME;
+        }
     }
     // Try to sniff a reasonable channel order, otherwise output the
     // channels in the order the PCE declared them.
@@ -940,13 +946,18 @@ static int decode_eld_specific_config(AACContext *ac, AVCodecContext *avctx,
 static int decode_audio_specific_config(AACContext *ac,
                                         AVCodecContext *avctx,
                                         MPEG4AudioConfig *m4ac,
-                                        const uint8_t *data, int bit_size,
+                                        const uint8_t *data, int64_t bit_size,
                                         int sync_extension)
 {
     GetBitContext gb;
     int i, ret;
 
-    ff_dlog(avctx, "audio specific config size %d\n", bit_size >> 3);
+    if (bit_size < 0 || bit_size > INT_MAX) {
+        av_log(avctx, AV_LOG_ERROR, "Audio specific config size is invalid\n");
+        return AVERROR_INVALIDDATA;
+    }
+
+    ff_dlog(avctx, "audio specific config size %d\n", (int)bit_size >> 3);
     for (i = 0; i < bit_size >> 3; i++)
         ff_dlog(avctx, "%02x ", data[i]);
     ff_dlog(avctx, "\n");
@@ -1058,10 +1069,54 @@ static void reset_predictor_group(PredictorState *ps, int group_num)
 
 static void aacdec_init(AACContext *ac);
 
+static av_cold void aac_static_table_init(void)
+{
+    AAC_INIT_VLC_STATIC( 0, 304);
+    AAC_INIT_VLC_STATIC( 1, 270);
+    AAC_INIT_VLC_STATIC( 2, 550);
+    AAC_INIT_VLC_STATIC( 3, 300);
+    AAC_INIT_VLC_STATIC( 4, 328);
+    AAC_INIT_VLC_STATIC( 5, 294);
+    AAC_INIT_VLC_STATIC( 6, 306);
+    AAC_INIT_VLC_STATIC( 7, 268);
+    AAC_INIT_VLC_STATIC( 8, 510);
+    AAC_INIT_VLC_STATIC( 9, 366);
+    AAC_INIT_VLC_STATIC(10, 462);
+
+    AAC_RENAME(ff_aac_sbr_init)();
+
+    ff_aac_tableinit();
+
+    INIT_VLC_STATIC(&vlc_scalefactors, 7,
+                    FF_ARRAY_ELEMS(ff_aac_scalefactor_code),
+                    ff_aac_scalefactor_bits,
+                    sizeof(ff_aac_scalefactor_bits[0]),
+                    sizeof(ff_aac_scalefactor_bits[0]),
+                    ff_aac_scalefactor_code,
+                    sizeof(ff_aac_scalefactor_code[0]),
+                    sizeof(ff_aac_scalefactor_code[0]),
+                    352);
+
+    // window initialization
+    AAC_RENAME(ff_kbd_window_init)(AAC_RENAME(ff_aac_kbd_long_1024), 4.0, 1024);
+    AAC_RENAME(ff_kbd_window_init)(AAC_RENAME(ff_aac_kbd_short_128), 6.0, 128);
+    AAC_RENAME(ff_init_ff_sine_windows)(10);
+    AAC_RENAME(ff_init_ff_sine_windows)( 9);
+    AAC_RENAME(ff_init_ff_sine_windows)( 7);
+
+    AAC_RENAME(ff_cbrt_tableinit)();
+}
+
+static AVOnce aac_table_init = AV_ONCE_INIT;
+
 static av_cold int aac_decode_init(AVCodecContext *avctx)
 {
     AACContext *ac = avctx->priv_data;
     int ret;
+
+    ret = ff_thread_once(&aac_table_init, &aac_static_table_init);
+    if (ret != 0)
+        return AVERROR_UNKNOWN;
 
     ac->avctx = avctx;
     ac->oc[1].m4ac.sample_rate = avctx->sample_rate;
@@ -1076,7 +1131,7 @@ static av_cold int aac_decode_init(AVCodecContext *avctx)
     if (avctx->extradata_size > 0) {
         if ((ret = decode_audio_specific_config(ac, ac->avctx, &ac->oc[1].m4ac,
                                                 avctx->extradata,
-                                                avctx->extradata_size * 8,
+                                                avctx->extradata_size * 8LL,
                                                 1)) < 0)
             return ret;
     } else {
@@ -1114,42 +1169,16 @@ static av_cold int aac_decode_init(AVCodecContext *avctx)
         return AVERROR_INVALIDDATA;
     }
 
-    AAC_INIT_VLC_STATIC( 0, 304);
-    AAC_INIT_VLC_STATIC( 1, 270);
-    AAC_INIT_VLC_STATIC( 2, 550);
-    AAC_INIT_VLC_STATIC( 3, 300);
-    AAC_INIT_VLC_STATIC( 4, 328);
-    AAC_INIT_VLC_STATIC( 5, 294);
-    AAC_INIT_VLC_STATIC( 6, 306);
-    AAC_INIT_VLC_STATIC( 7, 268);
-    AAC_INIT_VLC_STATIC( 8, 510);
-    AAC_INIT_VLC_STATIC( 9, 366);
-    AAC_INIT_VLC_STATIC(10, 462);
-
-    ff_aac_sbr_init();
-
 #if USE_FIXED
-    ac->fdsp = avpriv_alloc_fixed_dsp(avctx->flags & CODEC_FLAG_BITEXACT);
+    ac->fdsp = avpriv_alloc_fixed_dsp(avctx->flags & AV_CODEC_FLAG_BITEXACT);
 #else
-    ac->fdsp = avpriv_float_dsp_alloc(avctx->flags & CODEC_FLAG_BITEXACT);
+    ac->fdsp = avpriv_float_dsp_alloc(avctx->flags & AV_CODEC_FLAG_BITEXACT);
 #endif /* USE_FIXED */
     if (!ac->fdsp) {
         return AVERROR(ENOMEM);
     }
 
     ac->random_state = 0x1f2e3d4c;
-
-    ff_aac_tableinit();
-
-    INIT_VLC_STATIC(&vlc_scalefactors, 7,
-                    FF_ARRAY_ELEMS(ff_aac_scalefactor_code),
-                    ff_aac_scalefactor_bits,
-                    sizeof(ff_aac_scalefactor_bits[0]),
-                    sizeof(ff_aac_scalefactor_bits[0]),
-                    ff_aac_scalefactor_code,
-                    sizeof(ff_aac_scalefactor_code[0]),
-                    sizeof(ff_aac_scalefactor_code[0]),
-                    352);
 
     AAC_RENAME_32(ff_mdct_init)(&ac->mdct,       11, 1, 1.0 / RANGE15(1024.0));
     AAC_RENAME_32(ff_mdct_init)(&ac->mdct_ld,    10, 1, 1.0 / RANGE15(512.0));
@@ -1160,14 +1189,6 @@ static av_cold int aac_decode_init(AVCodecContext *avctx)
     if (ret < 0)
         return ret;
 #endif
-    // window initialization
-    AAC_RENAME(ff_kbd_window_init)(AAC_RENAME(ff_aac_kbd_long_1024), 4.0, 1024);
-    AAC_RENAME(ff_kbd_window_init)(AAC_RENAME(ff_aac_kbd_short_128), 6.0, 128);
-    AAC_RENAME(ff_init_ff_sine_windows)(10);
-    AAC_RENAME(ff_init_ff_sine_windows)( 9);
-    AAC_RENAME(ff_init_ff_sine_windows)( 7);
-
-    AAC_RENAME(cbrt_tableinit)();
 
     return 0;
 }
@@ -1774,7 +1795,7 @@ static int decode_spectrum_and_dequant(AACContext *ac, INTFLOAT coef[1024],
                                         v = -v;
                                     *icf++ = v;
 #else
-                                    *icf++ = cbrt_tab[n] | (bits & 1U<<31);
+                                    *icf++ = ff_cbrt_tab[n] | (bits & 1U<<31);
 #endif /* USE_FIXED */
                                     bits <<= 1;
                                 } else {
@@ -2315,7 +2336,7 @@ static int decode_extension_payload(AACContext *ac, GetBitContext *gb, int cnt,
             ac->oc[1].m4ac.sbr = 1;
             ac->avctx->profile = FF_PROFILE_AAC_HE;
         }
-        res = ff_decode_sbr_extension(ac, &che->sbr, gb, crc_flag, cnt, elem_type);
+        res = AAC_RENAME(ff_decode_sbr_extension)(ac, &che->sbr, gb, crc_flag, cnt, elem_type);
         break;
     case EXT_DYNAMIC_RANGE:
         res = decode_dynamic_range(&ac->che_drc, gb);
@@ -2357,7 +2378,7 @@ static void apply_tns(INTFLOAT coef[1024], TemporalNoiseShaping *tns,
                 continue;
 
             // tns_decode_coef
-            compute_lpc_coefs(tns->coef[w][filt], order, lpc, 0, 0, 0);
+            AAC_RENAME(compute_lpc_coefs)(tns->coef[w][filt], order, lpc, 0, 0, 0);
 
             start = ics->swb_offset[FFMIN(bottom, mmm)];
             end   = ics->swb_offset[FFMIN(   top, mmm)];
@@ -2598,7 +2619,7 @@ static void imdct_and_windowing_eld(AACContext *ac, SingleChannelElement *sce)
     const int n  = ac->oc[1].m4ac.frame_length_short ? 480 : 512;
     const int n2 = n >> 1;
     const int n4 = n >> 2;
-    const INTFLOAT *const window = n == 480 ? ff_aac_eld_window_480 :
+    const INTFLOAT *const window = n == 480 ? AAC_RENAME(ff_aac_eld_window_480) :
                                            AAC_RENAME(ff_aac_eld_window_512);
 
     // Inverse transform, mapped to the conventional IMDCT by
@@ -2694,7 +2715,7 @@ static void apply_channel_coupling(AACContext *ac, ChannelElement *cc,
 /**
  * Convert spectral data to samples, applying all supported tools as appropriate.
  */
-static void spectral_to_sample(AACContext *ac)
+static void spectral_to_sample(AACContext *ac, int samples)
 {
     int i, type;
     void (*imdct_and_window)(AACContext *ac, SingleChannelElement *sce);
@@ -2738,7 +2759,7 @@ static void spectral_to_sample(AACContext *ac)
                             ac->update_ltp(ac, &che->ch[1]);
                     }
                     if (ac->oc[1].m4ac.sbr > 0) {
-                        ff_sbr_apply(ac, &che->sbr, type, che->ch[0].ret, che->ch[1].ret);
+                        AAC_RENAME(ff_sbr_apply)(ac, &che->sbr, type, che->ch[0].ret, che->ch[1].ret);
                     }
                 }
                 if (type <= TYPE_CCE)
@@ -2748,9 +2769,10 @@ static void spectral_to_sample(AACContext *ac)
                 {
                     int j;
                     /* preparation for resampler */
-                    for(j = 0; j<2048; j++){
+                    for(j = 0; j<samples; j++){
                         che->ch[0].ret[j] = (int32_t)av_clipl_int32((int64_t)che->ch[0].ret[j]<<7)+0x8000;
-                        che->ch[1].ret[j] = (int32_t)av_clipl_int32((int64_t)che->ch[1].ret[j]<<7)+0x8000;
+                        if(type == TYPE_CPE)
+                            che->ch[1].ret[j] = (int32_t)av_clipl_int32((int64_t)che->ch[1].ret[j]<<7)+0x8000;
                     }
                 }
 #endif /* USE_FIXED */
@@ -2881,7 +2903,12 @@ static int aac_decode_er_frame(AVCodecContext *avctx, void *data,
             return err;
     }
 
-    spectral_to_sample(ac);
+    spectral_to_sample(ac, samples);
+
+    if (!ac->frame->data[0] && samples) {
+        av_log(avctx, AV_LOG_ERROR, "no frame data found\n");
+        return AVERROR_INVALIDDATA;
+    }
 
     ac->frame->nb_samples = samples;
     ac->frame->sample_rate = avctx->sample_rate;
@@ -3029,10 +3056,10 @@ static int aac_decode_frame_int(AVCodecContext *avctx, void *data,
         return 0;
     }
 
-    spectral_to_sample(ac);
-
     multiplier = (ac->oc[1].m4ac.sbr == 1) ? ac->oc[1].m4ac.ext_sample_rate > ac->oc[1].m4ac.sample_rate : 0;
     samples <<= multiplier;
+
+    spectral_to_sample(ac, samples);
 
     if (ac->oc[1].status && audio_found) {
         avctx->sample_rate = ac->oc[1].m4ac.sample_rate << multiplier;
@@ -3098,7 +3125,7 @@ static int aac_decode_frame(AVCodecContext *avctx, void *data,
     if (new_extradata && 0) {
         av_free(avctx->extradata);
         avctx->extradata = av_mallocz(new_extradata_size +
-                                      FF_INPUT_BUFFER_PADDING_SIZE);
+                                      AV_INPUT_BUFFER_PADDING_SIZE);
         if (!avctx->extradata)
             return AVERROR(ENOMEM);
         avctx->extradata_size = new_extradata_size;
@@ -3106,7 +3133,7 @@ static int aac_decode_frame(AVCodecContext *avctx, void *data,
         push_output_configuration(ac);
         if (decode_audio_specific_config(ac, ac->avctx, &ac->oc[1].m4ac,
                                          avctx->extradata,
-                                         avctx->extradata_size*8, 1) < 0) {
+                                         avctx->extradata_size*8LL, 1) < 0) {
             pop_output_configuration(ac);
             return AVERROR_INVALIDDATA;
         }
@@ -3121,7 +3148,7 @@ static int aac_decode_frame(AVCodecContext *avctx, void *data,
     if (INT_MAX / 8 <= buf_size)
         return AVERROR_INVALIDDATA;
 
-    if ((err = init_get_bits(&gb, buf, buf_size * 8)) < 0)
+    if ((err = init_get_bits8(&gb, buf, buf_size)) < 0)
         return err;
 
     switch (ac->oc[1].m4ac.object_type) {
@@ -3153,7 +3180,7 @@ static av_cold int aac_decode_close(AVCodecContext *avctx)
     for (i = 0; i < MAX_ELEM_ID; i++) {
         for (type = 0; type < 4; type++) {
             if (ac->che[type][i])
-                ff_aac_sbr_ctx_close(&ac->che[type][i]->sbr);
+                AAC_RENAME(ff_aac_sbr_ctx_close)(&ac->che[type][i]->sbr);
             av_freep(&ac->che[type][i]);
         }
     }
@@ -3208,16 +3235,4 @@ static const AVClass aac_decoder_class = {
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
-};
-
-static const AVProfile profiles[] = {
-    { FF_PROFILE_AAC_MAIN,  "Main"     },
-    { FF_PROFILE_AAC_LOW,   "LC"       },
-    { FF_PROFILE_AAC_SSR,   "SSR"      },
-    { FF_PROFILE_AAC_LTP,   "LTP"      },
-    { FF_PROFILE_AAC_HE,    "HE-AAC"   },
-    { FF_PROFILE_AAC_HE_V2, "HE-AACv2" },
-    { FF_PROFILE_AAC_LD,    "LD"       },
-    { FF_PROFILE_AAC_ELD,   "ELD"      },
-    { FF_PROFILE_UNKNOWN },
 };

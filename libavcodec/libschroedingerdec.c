@@ -326,7 +326,12 @@ static int libschroedinger_decode_frame(AVCodecContext *avctx,
                framewithpts->frame->components[2].length);
 
         /* Fill frame with current buffer data from Schroedinger. */
-        avframe->pkt_pts = framewithpts->pts;
+        avframe->pts = framewithpts->pts;
+#if FF_API_PKT_PTS
+FF_DISABLE_DEPRECATION_WARNINGS
+        avframe->pkt_pts = avframe->pts;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
         avframe->linesize[0] = framewithpts->frame->components[0].stride;
         avframe->linesize[1] = framewithpts->frame->components[1].stride;
         avframe->linesize[2] = framewithpts->frame->components[2].stride;
@@ -383,6 +388,6 @@ AVCodec ff_libschroedinger_decoder = {
     .init           = libschroedinger_decode_init,
     .close          = libschroedinger_decode_close,
     .decode         = libschroedinger_decode_frame,
-    .capabilities   = CODEC_CAP_DELAY,
+    .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_DR1,
     .flush          = libschroedinger_flush,
 };
