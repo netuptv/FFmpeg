@@ -1159,6 +1159,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         if (st1->pid == ts_st->service->pcr_pid) {
             pcr_st = st1;
         }
+    }
     av_assert0(ts_st->payload != buf || st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO);
     if (ts->flags & MPEGTS_FLAG_PAT_PMT_AT_FRAMES && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         force_pat = 1;
