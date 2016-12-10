@@ -697,6 +697,8 @@ static int parse_source_list(char *buf, char **sources, int *num_sources,
     return 0;
 }
 
+static int udp_close(URLContext *h);
+
 /* put it in UDP context */
 /* return non zero if error */
 static int udp_open(URLContext *h, const char *uri, int flags)
@@ -724,6 +726,7 @@ static int udp_open(URLContext *h, const char *uri, int flags)
 	s->tail = NULL;
 	s->exit = 0;
 	s->count = 0;
+	s->tid = 0;
 
     if (is_output) {
         err = pthread_create(&s->tid, NULL, &do_udp_send_thr, h);
@@ -731,8 +734,6 @@ static int udp_open(URLContext *h, const char *uri, int flags)
             av_log(h, AV_LOG_ERROR, "Can't create UDP equalizer thread !\n");
             goto fail;
         }
-    } else {
-        s->tid = 0;
     }
 
     if (s->sources) {
@@ -1031,6 +1032,10 @@ static int udp_open(URLContext *h, const char *uri, int flags)
     pthread_mutex_destroy(&s->mutex);
 #endif
  fail:
+    if (s->tid) {
+        udp_close(h);
+        s->tid = 0;
+    }
     if (udp_fd >= 0)
         closesocket(udp_fd);
     av_fifo_freep(&s->fifo);
