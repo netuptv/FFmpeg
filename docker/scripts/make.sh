@@ -13,5 +13,5 @@ cd ${BUILD_DIR}
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-${SRC_DIR}/configure --prefix=${OUT_DIR} --enable-pic --enable-libmp3lame
+${SRC_DIR}/configure --prefix=${OUT_DIR} --enable-pic --enable-libmp3lame --disable-vaapi
 make -j $(nproc) install-libs install-headers
