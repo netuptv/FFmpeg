@@ -119,6 +119,7 @@ typedef struct UDPContext {
     pthread_mutex_t lock;
     pthread_t tid;
     int exit;
+    int64_t udp_eq_interval;
 } UDPContext;
 
 void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct UDPpkt *pkt);
@@ -135,6 +136,7 @@ static const AVOption options[] = {
     { "localaddr",      "Local address",                                   OFFSET(localaddr),      AV_OPT_TYPE_STRING, { .str = NULL },               .flags = D|E },
     { "udplite_coverage", "choose UDPLite head size which should be validated by checksum", OFFSET(udplite_coverage), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, D|E },
     { "pkt_size",       "Maximum UDP packet size",                         OFFSET(pkt_size),       AV_OPT_TYPE_INT,    { .i64 = 1472 },  -1, INT_MAX, .flags = D|E },
+    { "udp_eq_interval", "Duration of bit rate equalization interval in ms", OFFSET(udp_eq_interval), AV_OPT_TYPE_INT, { .i64 = 100 },  100,   10000, E },
     { "reuse",          "explicitly allow reusing UDP sockets",            OFFSET(reuse_socket),   AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, 1,       D|E },
     { "reuse_socket",   "explicitly allow reusing UDP sockets",            OFFSET(reuse_socket),   AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, 1,       .flags = D|E },
     { "broadcast", "explicitly allow or disallow broadcast destination",   OFFSET(is_broadcast),   AV_OPT_TYPE_INT,    { .i64 = 0  },     0, 1,       E },
@@ -662,6 +664,9 @@ static int udp_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "pkt_size", p)) {
             s->pkt_size = strtol(buf, NULL, 10);
         }
+        if (av_find_info_tag(buf, sizeof(buf), "udp_eq_interval", p)) {
+            s->udp_eq_interval = strtol(buf, NULL, 10);
+        }
         if (av_find_info_tag(buf, sizeof(buf), "buffer_size", p)) {
             s->buffer_size = strtol(buf, NULL, 10);
         }
@@ -980,9 +985,6 @@ void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct 
 
 
 
-/* netup: udp send equalizer */
-#define UDP_EQ_INTERVAL 1000000
-
 void* do_udp_send_thr(void *arg)
 {
 	URLContext *h = (URLContext *)arg;
@@ -1003,12 +1005,12 @@ void* do_udp_send_thr(void *arg)
 	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread started\n", s);
 	while(!s->exit){
 		counter++;
-		wake_time = start_time + UDP_EQ_INTERVAL * counter;
-		next_time = wake_time + UDP_EQ_INTERVAL;
+		wake_time = start_time + s->udp_eq_interval * 1000 * counter;
+		next_time = wake_time + s->udp_eq_interval * 1000;
 
 		need2sleep = wake_time - av_gettime();
 		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time=%lld (need2sleep=%lld)\n", s, wake_time, need2sleep );
-		if( need2sleep < 2*UDP_EQ_INTERVAL && need2sleep > 0 )
+		if( need2sleep < 2 * 1000 * s->udp_eq_interval && need2sleep > 0 )
 			usleep( need2sleep );
 	
 		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time usleep done. try pthread_mutex_lock \n");
@@ -1028,7 +1030,7 @@ void* do_udp_send_thr(void *arg)
 		// av_log(NULL, AV_LOG_DEBUG, "[%p] udp:equalizer:thread next_time=%lld count=%lld \n", s, next_time, count  );
 
 		/* calculate time to send */
-		delta = UDP_EQ_INTERVAL/count;
+		delta = 1000 * s->udp_eq_interval / count;
         // av_log(NULL, AV_LOG_DEBUG, "[%p] udp:delta=%lld next-tail=%lld next-head=%lld usecs count=%d\n", s, delta, next_time - tail->time, next_time - head->time, count );
 
 		pkt = head;
