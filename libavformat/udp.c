@@ -596,7 +596,8 @@ static int udp_open(URLContext *h, const char *uri, int flags)
     int i, num_include_sources = 0, num_exclude_sources = 0;
     char *include_sources[32], *exclude_sources[32];
     int err = 0;
-
+    
+    s->udp_fd = -1;
     h->is_streamed = 1;
 
     is_output = !(flags & AVIO_FLAG_READ);
@@ -891,6 +892,8 @@ static int udp_open(URLContext *h, const char *uri, int flags)
 #endif
  fail:
     if (s->tid) {
+        if (s->udp_fd >= 0)
+            udp_fd = -1;
         udp_close(h);
         s->tid = 0;
     }
@@ -1139,9 +1142,10 @@ static int udp_close(URLContext *h)
 
 
 
-    if (s->is_multicast && (h->flags & AVIO_FLAG_READ))
+    if (s->is_multicast && (h->flags & AVIO_FLAG_READ) && s->udp_fd >= 0)
         udp_leave_multicast_group(s->udp_fd, (struct sockaddr *)&s->dest_addr,(struct sockaddr *)&s->local_addr_storage);
-    closesocket(s->udp_fd);
+    if (s->udp_fd >= 0)
+        closesocket(s->udp_fd);
 #if HAVE_PTHREAD_CANCEL
     if (s->thread_started) {
         int ret;
