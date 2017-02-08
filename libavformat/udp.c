@@ -115,11 +115,13 @@ typedef struct UDPContext {
 
     struct UDPpkt * head;
     struct UDPpkt * tail;
-    int64_t count;
+    int queue_length; // number of packets currently in queue
+    int64_t queue_size_bytes; // total size of all queue elements
+    int64_t bytes_sent;
     pthread_mutex_t lock;
     pthread_t tid;
     int exit;
-    int64_t udp_eq_interval;
+    int64_t muxrate;
 } UDPContext;
 
 void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct UDPpkt *pkt);
@@ -136,7 +138,7 @@ static const AVOption options[] = {
     { "localaddr",      "Local address",                                   OFFSET(localaddr),      AV_OPT_TYPE_STRING, { .str = NULL },               .flags = D|E },
     { "udplite_coverage", "choose UDPLite head size which should be validated by checksum", OFFSET(udplite_coverage), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, D|E },
     { "pkt_size",       "Maximum UDP packet size",                         OFFSET(pkt_size),       AV_OPT_TYPE_INT,    { .i64 = 1472 },  -1, INT_MAX, .flags = D|E },
-    { "udp_eq_interval", "Duration of bit rate equalization interval in ms", OFFSET(udp_eq_interval), AV_OPT_TYPE_INT, { .i64 = 100 },  100,   10000, E },
+    { "muxrate",        "Stream muxrate in bits per second. VBR if unset.",OFFSET(muxrate),        AV_OPT_TYPE_INT,    { .i64 = 0 },    100,  100000, E },
     { "reuse",          "explicitly allow reusing UDP sockets",            OFFSET(reuse_socket),   AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, 1,       D|E },
     { "reuse_socket",   "explicitly allow reusing UDP sockets",            OFFSET(reuse_socket),   AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, 1,       .flags = D|E },
     { "broadcast", "explicitly allow or disallow broadcast destination",   OFFSET(is_broadcast),   AV_OPT_TYPE_INT,    { .i64 = 0  },     0, 1,       E },
@@ -605,7 +607,9 @@ static int udp_open(URLContext *h, const char *uri, int flags)
 	s->head = NULL;
 	s->tail = NULL;
 	s->exit = 0;
-	s->count = 0;
+	s->queue_length = 0;
+    s->queue_size_bytes = 0;
+    s->bytes_sent = 0;
 	s->tid = 0;
 
     if (is_output) {
@@ -664,8 +668,8 @@ static int udp_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "pkt_size", p)) {
             s->pkt_size = strtol(buf, NULL, 10);
         }
-        if (av_find_info_tag(buf, sizeof(buf), "udp_eq_interval", p)) {
-            s->udp_eq_interval = strtol(buf, NULL, 10);
+        if (av_find_info_tag(buf, sizeof(buf), "muxrate", p)) {
+            s->muxrate = strtol(buf, NULL, 10);
         }
         if (av_find_info_tag(buf, sizeof(buf), "buffer_size", p)) {
             s->buffer_size = strtol(buf, NULL, 10);
@@ -983,92 +987,83 @@ void llist_udp_add(struct UDPpkt **pkts_head, struct UDPpkt **pkts_tail, struct 
     *pkts_tail = pkt;
 }
 
-
-
 void* do_udp_send_thr(void *arg)
 {
 	URLContext *h = (URLContext *)arg;
     UDPContext *s = h->priv_data;
-	struct UDPpkt * head;
 	// struct UDPpkt * tail;
 	struct UDPpkt * pkt;
-	struct UDPpkt * pkt2del;
-	int64_t count = 0;
-	int64_t delta = 0;
 	int64_t start_time = av_gettime();
-	int64_t next_time = 0;
-	int64_t wake_time = 0;
-	int64_t counter = 0;
-	int64_t pkt_counter = 0;
-	int need2sleep = 0;
+    // stream delay in us, required for muxrate-based dejittering (to always have packets in the queue)
+    const int64_t base_delay = s->muxrate ? 1000000 : 0; // 1 second delay is a minimal one to avoid queue underflow on start
+    int64_t delay = base_delay;
+    int64_t last_send_time = 0;
+
+    // 8 Mbps is 1 byte per microsecond, i.e. 1 UDP packet (1316 bytes) is sent once in ~1.3 ms.
+    // We can take a rate limit of approximately 500 us per packet to avoid enormous traffic bursts
+    const int64_t min_gap = 500;
+    int64_t gap = 0;
 
 	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread started\n", s);
-	while(!s->exit){
-		counter++;
-		wake_time = start_time + s->udp_eq_interval * 1000 * counter;
-		next_time = wake_time + s->udp_eq_interval * 1000;
+	while (!s->exit) {
+        int64_t time_passed = av_gettime() - start_time - delay;
+        int64_t stream_time = s->muxrate ?
+                    1000000 * 8 * s->bytes_sent / s->muxrate :
+                    0; // send packets as early as possible if muxrate not specified
 
-		need2sleep = wake_time - av_gettime();
-		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time=%lld (need2sleep=%lld)\n", s, wake_time, need2sleep );
-		if( need2sleep < 2 * 1000 * s->udp_eq_interval && need2sleep > 0 )
-			usleep( need2sleep );
-	
-		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time usleep done. try pthread_mutex_lock \n");
+        pthread_mutex_lock(&s->lock);
+        if (s->muxrate && s->queue_size_bytes > 2 * s->muxrate * delay / 8 / 1000000) { // s->muxrate * delay / 8 / 1000000 is delay in bytes
+            stream_time = 0; // send packet immediately in case of overflow
+            av_log(NULL, AV_LOG_WARNING, 
+                "Queue overflow: %d packets, %"PRId64" mbytes, sending instantly. Check 'muxrate' value\n", 
+                s->queue_length, s->queue_size_bytes / 1000000);
+        }
+        pthread_mutex_unlock(&s->lock);
+
+        if (stream_time > time_passed) {
+            int64_t time_to_sleep = stream_time - time_passed;
+            // sleep at most 100 ms so the loop can exit fast
+            usleep(time_to_sleep < 100000 ? time_to_sleep : 100000);
+            continue;
+        }
+        // Grab the first packet from the queue and send
 		pthread_mutex_lock(&s->lock);
-		head = s->head;
-		// tail = s->tail;
-		count = s->count;
-		s->head = NULL;
-		s->tail = NULL;
-		s->count = 0;
+        if (!s->head) {
+            pthread_mutex_unlock(&s->lock);
+            if (s->muxrate) { // in case of VBR no need to keep the queue filled
+                av_log(NULL, AV_LOG_WARNING, "Queue underflow, increasing delay\n");
+                delay += base_delay; // increase delay to prevent further overflows
+            }
+            usleep(min_gap);
+            continue;
+        }
+
+        pkt = s->head;
+        s->head = pkt->next;
+        if (!s->head) {
+            s->tail = NULL;
+        }
+        pkt->next = NULL;
+        s->queue_length--;
+        s->queue_size_bytes -= pkt->size;
+        s->bytes_sent += pkt->size;
 		pthread_mutex_unlock(&s->lock);
 
-		// av_log(NULL, AV_LOG_DEBUG, "[%p] udp:equalizer:thread counter=%lld pkts count=%lld \n", s, counter, count );
-		if(count <= 0)
-			continue;
+        gap = av_gettime() - last_send_time;
+        if (gap < min_gap) {
+            usleep(min_gap - gap);
+        }
 
-		// av_log(NULL, AV_LOG_DEBUG, "[%p] udp:equalizer:thread next_time=%lld count=%lld \n", s, next_time, count  );
+        udp_send(h, pkt->buf, pkt->size);
+        last_send_time = av_gettime();
 
-		/* calculate time to send */
-		delta = 1000 * s->udp_eq_interval / count;
-        // av_log(NULL, AV_LOG_DEBUG, "[%p] udp:delta=%lld next-tail=%lld next-head=%lld usecs count=%d\n", s, delta, next_time - tail->time, next_time - head->time, count );
-
-		pkt = head;
-		pkt_counter = 0;
-		while(pkt){
-			pkt->time2send = wake_time + pkt_counter * delta;
-			if(pkt->time2send > next_time)
-				pkt->time2send = next_time;
-
-			pkt = pkt->next;
-			pkt_counter++;
-		}
-
-		/* do real send */
-		pkt_counter = 0;
-		pkt = head;
-		while(pkt){
-			// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread processing pkt->time2send=%lld need_sleep=%lld \n", s, pkt->time2send, pkt->time2send - av_gettime()  );
-			need2sleep = pkt->time2send - av_gettime();
-			if( pkt->time2send < next_time && need2sleep > 0 )
-				usleep( need2sleep );
-
-			udp_send(h, pkt->buf, pkt->size);
-			pkt2del = pkt;
-			pkt = pkt->next;
-
-			free(pkt2del->buf);
-			free(pkt2del);
-			pkt_counter++;
-		}
-		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread %lld packets processed \n", s, pkt_counter );
+        free(pkt->buf);
+        free(pkt);
 	}
 	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread done \n", s);
 
 	return 0;
 }
-
-
 
 static int udp_write(URLContext *h, const uint8_t *buf, int size)
 {   
@@ -1087,8 +1082,9 @@ static int udp_write(URLContext *h, const uint8_t *buf, int size)
     /* save to queue */
     pthread_mutex_lock(&s->lock);
     llist_udp_add(&s->head, &s->tail, pkt);
-    s->count++;
-    //av_log(NULL, AV_LOG_DEBUG, "[%p] udp:list count=%lld \n", s, s->count );
+    s->queue_length++;
+    s->queue_size_bytes += pkt->size;
+    //av_log(NULL, AV_LOG_DEBUG, "[%p] udp:list count=%lld \n", s, s->queue_length );
     pthread_mutex_unlock(&s->lock);
 
     return 0;
@@ -1131,7 +1127,7 @@ static int udp_close(URLContext *h)
 
 	/* clean allocated buffers */
 	head = s->head;
-	if(s->count > 0){
+	if(s->queue_length > 0){
 		pkt = head;
 		while(pkt){
 			pkt2del = pkt;
