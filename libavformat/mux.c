@@ -802,7 +802,7 @@ static int interleave_compare_dts(AVFormatContext *s, AVPacket *next,
                -( next->dts*st2->time_base.num*AV_TIME_BASE - s->audio_preload*(int64_t)(st2->codec->codec_type == AVMEDIA_TYPE_AUDIO)*st2->time_base.den)* st->time_base.den;
             ts2=0;
         }
-        comp= (ts>ts2) - (ts<ts2);
+        comp= (ts<ts2) - (ts>ts2);
     }
 
     if (comp == 0)
