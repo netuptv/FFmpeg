@@ -82,7 +82,6 @@ typedef struct MpegTSWrite {
     int tsid;
     int64_t first_pcr;
     int mux_rate; ///< set to 1 when VBR
-    int pes_payload_size;
 
     int transport_stream_id;
     int original_network_id;
@@ -209,19 +208,33 @@ static int mpegts_write_section1(MpegTSSection *s, int tid, int id,
 #define PAT_RETRANS_TIME 100
 #define PCR_RETRANS_TIME 20
 
+typedef struct MpegTSWritePayload {
+    int size;
+    int64_t pts;
+    int64_t dts;
+    int64_t duration;
+    int flags;
+    int psi_sent;
+    int is_start;
+    uint8_t *data;
+    int bytes_processed;
+    int packets_sent;
+    struct MpegTSWritePayload *next;
+    int packet_num; // DELETEME
+} MpegTSWritePayload;
+
 typedef struct MpegTSWriteStream {
     struct MpegTSService *service;
     int pid; /* stream associated pid */
     int cc;
-    int payload_size;
     int first_pts_check; ///< first pts check needed
     int prev_payload_key;
-    int64_t payload_pts;
-    int64_t payload_dts;
-    int payload_flags;
-    uint8_t *payload;
+    int64_t bytes_sent;
+    int64_t first_dts;
     AVFormatContext *amux;
     AVRational user_tb;
+    MpegTSWritePayload *payload;
+    int last_packet_num;
 } MpegTSWriteStream;
 
 static void mpegts_write_pat(AVFormatContext *s)
@@ -616,9 +629,6 @@ static int mpegts_write_header(AVFormatContext *s)
     if (s->max_delay < 0) /* Not set by the caller */
         s->max_delay = 0;
 
-    // round up to a whole number of TS packets
-    ts->pes_payload_size = (ts->pes_payload_size + 14 + 183) / 184 * 184 - 14;
-
     ts->tsid = ts->transport_stream_id;
     ts->onid = ts->original_network_id;
     /* allocate a single DVB service */
@@ -670,11 +680,6 @@ static int mpegts_write_header(AVFormatContext *s)
         ts_st->user_tb = st->time_base;
         avpriv_set_pts_info(st, 33, 1, 90000);
 
-        ts_st->payload = av_mallocz(ts->pes_payload_size);
-        if (!ts_st->payload) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
-        }
         ts_st->service = service;
         /* MPEG pid values < 16 are reserved. Applications which set st->id in
          * this range are assigned a calculated pid. */
@@ -701,8 +706,6 @@ static int mpegts_write_header(AVFormatContext *s)
             }
         }
         pids[i]                = ts_st->pid;
-        ts_st->payload_pts     = AV_NOPTS_VALUE;
-        ts_st->payload_dts     = AV_NOPTS_VALUE;
         ts_st->first_pts_check = 1;
         ts_st->cc              = 15;
         /* update PCR pid by using the first video stream */
@@ -956,19 +959,26 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
  * NOTE: 'payload' contains a complete PES payload. */
-static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
-                             const uint8_t *payload, int payload_size,
-                             int64_t pts, int64_t dts, int key)
+static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
 {
-    MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWrite *ts = s->priv_data;
+    MpegTSWriteStream *ts_st = st->priv_data;
+    MpegTSWritePayload *payload = ts_st->payload;
+
+    const uint8_t *payload_chunk = payload->data + payload->bytes_processed;
+    int payload_size = payload->size - payload->bytes_processed;
+    int64_t pts = payload->pts;
+    int64_t dts = payload->dts;
+    int key = payload->flags & AV_PKT_FLAG_KEY;
+
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
-    int val, is_start, len, header_len, write_pcr, is_dvb_subtitle, is_dvb_teletext, flags;
+    int val, len, header_len, write_pcr, flags;
+    int is_dvb_subtitle = 0, is_dvb_teletext = 0;
     int afc_len, stuffing_len;
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
-    int force_pat = st->codec->codec_type == AVMEDIA_TYPE_VIDEO && key && !ts_st->prev_payload_key;
+    int force_pat = !payload->psi_sent && st->codec->codec_type == AVMEDIA_TYPE_VIDEO && key && !ts_st->prev_payload_key;
     int i;
     MpegTSWriteStream *pcr_st = 0;
     for (i = 0; i < s->nb_streams; i++) {
@@ -978,241 +988,240 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         }
     }
 
-    is_start = 1;
-    while (payload_size > 0) {
-        retransmit_si_info(s, force_pat);
-        force_pat = 0;
+    retransmit_si_info(s, force_pat);
+    payload->psi_sent = 1;
 
-        write_pcr = 0;
-        if (ts->mux_rate > 1 || (is_start && ts_st->pid == ts_st->service->pcr_pid ) ) // VBR pcr period is based on frames
-            ts_st->service->pcr_packet_count++;
-        if (ts_st->service->pcr_packet_count >=
-            ts_st->service->pcr_packet_period) {
-            ts_st->service->pcr_packet_count = 0;
-            write_pcr = 1;
-        }
-
-        if (is_start && ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
-            (dts - get_pcr(ts, s->pb) / 300) > delay) {
-            if ((dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
-                av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - dts-pcr diff too large (%ld msec), resyncing PCR\n", (dts - get_pcr(ts, s->pb)/300)/90);
-                ts->first_pcr += dts*300 - get_pcr(ts, s->pb);
-            }
-            /* pcr insert gets priority over null packet insert */
-
-            if (write_pcr && pcr_st)
-                mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
-            else
-                mpegts_insert_null_packet(s);
-            /* recalculate write_pcr and possibly retransmit si_info */
-            continue;
-        }
-
-        /* prepare packet header */
-        q    = buf;
-        *q++ = 0x47;
-        val  = ts_st->pid >> 8;
-        if (is_start)
-            val |= 0x40;
-        *q++      = val;
-        *q++      = ts_st->pid;
-        ts_st->cc = ts_st->cc + 1 & 0xf;
-        *q++      = 0x10 | ts_st->cc; // payload indicator + CC
-        if (key && is_start && pts != AV_NOPTS_VALUE) {
-            // set Random Access for key frames
-            if (ts_st->pid == ts_st->service->pcr_pid)
-                write_pcr = 1;
-            set_af_flag(buf, 0x40);
-            q = get_ts_payload_start(buf);
-        }
-        if (write_pcr) {
-            if (ts_st->pid == ts_st->service->pcr_pid) {
-                set_af_flag(buf, 0x10);
-                q = get_ts_payload_start(buf);
-                // add 11, pcr references the last byte of program clock reference base
-                if (ts->mux_rate > 1)
-                    pcr = get_pcr(ts, s->pb);
-                else
-                    pcr = (dts - delay) * 300;
-                if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
-                    av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
-                extend_af(buf, write_pcr_bits(q, pcr));
-                q = get_ts_payload_start(buf);
-            } else if (pcr_st) {
-                mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
-            }
-        }
-        if (is_start) {
-            int pes_extension = 0;
-            int pes_header_stuffing_bytes = 0;
-            /* write PES header */
-            *q++ = 0x00;
-            *q++ = 0x00;
-            *q++ = 0x01;
-            is_dvb_subtitle = 0;
-            is_dvb_teletext = 0;
-            if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
-                if (st->codec->codec_id == AV_CODEC_ID_DIRAC)
-                    *q++ = 0xfd;
-                else
-                    *q++ = 0xe0;
-            } else if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
-                       (st->codec->codec_id == AV_CODEC_ID_MP2 ||
-                        st->codec->codec_id == AV_CODEC_ID_MP3 ||
-                        st->codec->codec_id == AV_CODEC_ID_AAC)) {
-                *q++ = 0xc0;
-            } else if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
-                        st->codec->codec_id == AV_CODEC_ID_AC3 &&
-                        ts->m2ts_mode) {
-                *q++ = 0xfd;
-            } else {
-                *q++ = 0xbd;
-                if (st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE) {
-                    if (st->codec->codec_id == AV_CODEC_ID_DVB_SUBTITLE) {
-                        is_dvb_subtitle = 1;
-                    } else if (st->codec->codec_id == AV_CODEC_ID_DVB_TELETEXT) {
-                        is_dvb_teletext = 1;
-                    }
-                }
-            }
-            header_len = 0;
-            flags      = 0;
-            if (pts != AV_NOPTS_VALUE) {
-                header_len += 5;
-                flags      |= 0x80;
-            }
-            if (dts != AV_NOPTS_VALUE && pts != AV_NOPTS_VALUE && dts != pts) {
-                header_len += 5;
-                flags      |= 0x40;
-            }
-            if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO &&
-                st->codec->codec_id == AV_CODEC_ID_DIRAC) {
-                /* set PES_extension_flag */
-                pes_extension = 1;
-                flags        |= 0x01;
-
-                /* One byte for PES2 extension flag +
-                 * one byte for extension length +
-                 * one byte for extension id */
-                header_len += 3;
-            }
-            /* for Blu-ray AC3 Audio the PES Extension flag should be as follow
-             * otherwise it will not play sound on blu-ray
-             */
-            if (ts->m2ts_mode &&
-                st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
-                st->codec->codec_id == AV_CODEC_ID_AC3) {
-                        /* set PES_extension_flag */
-                        pes_extension = 1;
-                        flags |= 0x01;
-                        header_len += 3;
-            }
-            if (is_dvb_teletext) {
-                pes_header_stuffing_bytes = 0x24 - header_len;
-                header_len = 0x24;
-            }
-            len = payload_size + header_len + 3;
-            /* 3 extra bytes should be added to DVB subtitle payload: 0x20 0x00 at the beginning and trailing 0xff */
-            if (is_dvb_subtitle) {
-                len += 3;
-                payload_size++;
-            }
-            if (len > 0xffff)
-                len = 0;
-            if (ts->omit_video_pes_length && st->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
-                len = 0;
-            }
-            *q++ = len >> 8;
-            *q++ = len;
-            val  = 0x80;
-            /* data alignment indicator is required for subtitle and data streams */
-            if (st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codec->codec_type == AVMEDIA_TYPE_DATA)
-                val |= 0x04;
-            *q++ = val;
-            *q++ = flags;
-            *q++ = header_len;
-            if (pts != AV_NOPTS_VALUE) {
-                write_pts(q, flags >> 6, pts);
-                q += 5;
-            }
-            if (dts != AV_NOPTS_VALUE && pts != AV_NOPTS_VALUE && dts != pts) {
-                write_pts(q, 1, dts);
-                q += 5;
-            }
-            if (pes_extension && st->codec->codec_id == AV_CODEC_ID_DIRAC) {
-                flags = 0x01;  /* set PES_extension_flag_2 */
-                *q++  = flags;
-                *q++  = 0x80 | 0x01; /* marker bit + extension length */
-                /* Set the stream ID extension flag bit to 0 and
-                 * write the extended stream ID. */
-                *q++ = 0x00 | 0x60;
-            }
-            /* For Blu-ray AC3 Audio Setting extended flags */
-          if (ts->m2ts_mode &&
-              pes_extension &&
-              st->codec->codec_id == AV_CODEC_ID_AC3) {
-                      flags = 0x01; /* set PES_extension_flag_2 */
-                      *q++ = flags;
-                      *q++ = 0x80 | 0x01; /* marker bit + extension length */
-                      *q++ = 0x00 | 0x71; /* for AC3 Audio (specifically on blue-rays) */
-              }
-
-
-            if (is_dvb_subtitle) {
-                /* First two fields of DVB subtitles PES data:
-                 * data_identifier: for DVB subtitle streams shall be coded with the value 0x20
-                 * subtitle_stream_id: for DVB subtitle stream shall be identified by the value 0x00 */
-                *q++ = 0x20;
-                *q++ = 0x00;
-            }
-            if (is_dvb_teletext) {
-                memset(q, 0xff, pes_header_stuffing_bytes);
-                q += pes_header_stuffing_bytes;
-            }
-            is_start = 0;
-        }
-        /* header size */
-        header_len = q - buf;
-        /* data len */
-        len = TS_PACKET_SIZE - header_len;
-        if (len > payload_size)
-            len = payload_size;
-        stuffing_len = TS_PACKET_SIZE - header_len - len;
-        if (stuffing_len > 0) {
-            /* add stuffing with AFC */
-            if (buf[3] & 0x20) {
-                /* stuffing already present: increase its size */
-                afc_len = buf[4] + 1;
-                memmove(buf + 4 + afc_len + stuffing_len,
-                        buf + 4 + afc_len,
-                        header_len - (4 + afc_len));
-                buf[4] += stuffing_len;
-                memset(buf + 4 + afc_len, 0xff, stuffing_len);
-            } else {
-                /* add stuffing */
-                memmove(buf + 4 + stuffing_len, buf + 4, header_len - 4);
-                buf[3] |= 0x20;
-                buf[4]  = stuffing_len - 1;
-                if (stuffing_len >= 2) {
-                    buf[5] = 0x00;
-                    memset(buf + 6, 0xff, stuffing_len - 2);
-                }
-            }
-        }
-
-        if (is_dvb_subtitle && payload_size == len) {
-            memcpy(buf + TS_PACKET_SIZE - len, payload, len - 1);
-            buf[TS_PACKET_SIZE - 1] = 0xff; /* end_of_PES_data_field_marker: an 8-bit field with fixed contents 0xff for DVB subtitle */
-        } else {
-            memcpy(buf + TS_PACKET_SIZE - len, payload, len);
-        }
-
-        payload      += len;
-        payload_size -= len;
-        mpegts_prefix_m2ts_header(s);
-        avio_write(s->pb, buf, TS_PACKET_SIZE);
+    write_pcr = 0;
+    if (ts->mux_rate > 1 || (payload->is_start && ts_st->pid == ts_st->service->pcr_pid ) ) // VBR pcr period is based on frames
+        ts_st->service->pcr_packet_count++;
+    if (ts_st->service->pcr_packet_count >=
+        ts_st->service->pcr_packet_period) {
+        ts_st->service->pcr_packet_count = 0;
+        write_pcr = 1;
     }
-    ts_st->prev_payload_key = key;
+
+    if (payload->is_start && ts->mux_rate > 1 && dts != AV_NOPTS_VALUE && (dts - get_pcr(ts, s->pb) / 300) > delay) {
+        if ((dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
+            av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - dts-pcr diff too large (%ld msec), resyncing PCR\n", 
+                (dts - get_pcr(ts, s->pb)/300)/90);
+            ts->first_pcr += dts*300 - get_pcr(ts, s->pb);
+        }
+        /* pcr insert gets priority over null packet insert */
+
+        if (write_pcr && pcr_st) {
+            mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
+        } else {
+            mpegts_insert_null_packet(s);
+        }
+        /* recalculate write_pcr and possibly retransmit si_info */
+        return;
+    }
+
+    /* prepare TS packet header */
+    q    = buf;
+    *q++ = 0x47;
+    val  = ts_st->pid >> 8;
+    if (payload->is_start)
+        val |= 0x40;
+    *q++      = val;
+    *q++      = ts_st->pid;
+    ts_st->cc = ts_st->cc + 1 & 0xf;
+
+    *q++      = 0x10 | ts_st->cc; // payload indicator + CC
+    if (key && payload->is_start && pts != AV_NOPTS_VALUE) {
+        // set Random Access for key frames
+        if (ts_st->pid == ts_st->service->pcr_pid)
+            write_pcr = 1;
+        set_af_flag(buf, 0x40);
+        q = get_ts_payload_start(buf);
+    }
+    if (write_pcr) {
+        if (ts_st->pid == ts_st->service->pcr_pid) {
+            set_af_flag(buf, 0x10);
+            q = get_ts_payload_start(buf);
+            // add 11, pcr references the last byte of program clock reference base
+            if (ts->mux_rate > 1)
+                pcr = get_pcr(ts, s->pb);
+            else
+                pcr = (dts - delay) * 300;
+            if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
+                av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
+            extend_af(buf, write_pcr_bits(q, pcr));
+            q = get_ts_payload_start(buf);
+        } else if (pcr_st) {
+            mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
+        }
+    }
+    if (st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+        if (st->codec->codec_id == AV_CODEC_ID_DVB_SUBTITLE) {
+            is_dvb_subtitle = 1;
+        } else if (st->codec->codec_id == AV_CODEC_ID_DVB_TELETEXT) {
+            is_dvb_teletext = 1;
+        }
+    }
+    if (payload->is_start) {
+        int pes_extension = 0;
+        int pes_header_stuffing_bytes = 0;
+        /* write PES header */
+        *q++ = 0x00;
+        *q++ = 0x00;
+        *q++ = 0x01;
+        if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (st->codec->codec_id == AV_CODEC_ID_DIRAC)
+                *q++ = 0xfd;
+            else
+                *q++ = 0xe0;
+        } else if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
+                   (st->codec->codec_id == AV_CODEC_ID_MP2 ||
+                    st->codec->codec_id == AV_CODEC_ID_MP3 ||
+                    st->codec->codec_id == AV_CODEC_ID_AAC)) {
+            *q++ = 0xc0;
+        } else if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
+                    st->codec->codec_id == AV_CODEC_ID_AC3 &&
+                    ts->m2ts_mode) {
+            *q++ = 0xfd;
+        } else {
+            *q++ = 0xbd;
+        }
+        header_len = 0;
+        flags      = 0;
+        if (pts != AV_NOPTS_VALUE) {
+            header_len += 5;
+            flags      |= 0x80;
+        }
+        if (dts != AV_NOPTS_VALUE && pts != AV_NOPTS_VALUE && dts != pts) {
+            header_len += 5;
+            flags      |= 0x40;
+        }
+        if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO &&
+            st->codec->codec_id == AV_CODEC_ID_DIRAC) {
+            /* set PES_extension_flag */
+            pes_extension = 1;
+            flags        |= 0x01;
+
+            /* One byte for PES2 extension flag +
+             * one byte for extension length +
+             * one byte for extension id */
+            header_len += 3;
+        }
+        /* for Blu-ray AC3 Audio the PES Extension flag should be as follow
+         * otherwise it will not play sound on blu-ray
+         */
+        if (ts->m2ts_mode &&
+            st->codec->codec_type == AVMEDIA_TYPE_AUDIO &&
+            st->codec->codec_id == AV_CODEC_ID_AC3) {
+                    /* set PES_extension_flag */
+                    pes_extension = 1;
+                    flags |= 0x01;
+                    header_len += 3;
+        }
+        if (is_dvb_teletext) {
+            pes_header_stuffing_bytes = 0x24 - header_len;
+            header_len = 0x24;
+        }
+        len = payload_size + header_len + 3;
+        /* 3 extra bytes should be added to DVB subtitle payload: 0x20 0x00 at the beginning and trailing 0xff */
+        if (is_dvb_subtitle) {
+            len += 3;
+            payload_size++;
+        }
+        if (len > 0xffff)
+            len = 0;
+        if (ts->omit_video_pes_length && st->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+            len = 0;
+        }
+        *q++ = len >> 8;
+        *q++ = len;
+        val  = 0x80;
+        /* data alignment indicator is required for subtitle and data streams */
+        if (st->codec->codec_type == AVMEDIA_TYPE_SUBTITLE || st->codec->codec_type == AVMEDIA_TYPE_DATA)
+            val |= 0x04;
+        *q++ = val;
+        *q++ = flags;
+        *q++ = header_len;
+        if (pts != AV_NOPTS_VALUE) {
+            write_pts(q, flags >> 6, pts);
+            q += 5;
+        }
+        if (dts != AV_NOPTS_VALUE && pts != AV_NOPTS_VALUE && dts != pts) {
+            write_pts(q, 1, dts);
+            q += 5;
+        }
+        if (pes_extension && st->codec->codec_id == AV_CODEC_ID_DIRAC) {
+            flags = 0x01;  /* set PES_extension_flag_2 */
+            *q++  = flags;
+            *q++  = 0x80 | 0x01; /* marker bit + extension length */
+            /* Set the stream ID extension flag bit to 0 and
+             * write the extended stream ID. */
+            *q++ = 0x00 | 0x60;
+        }
+        /* For Blu-ray AC3 Audio Setting extended flags */
+        if (ts->m2ts_mode &&
+            pes_extension &&
+            st->codec->codec_id == AV_CODEC_ID_AC3) {
+                  flags = 0x01; /* set PES_extension_flag_2 */
+                  *q++ = flags;
+                  *q++ = 0x80 | 0x01; /* marker bit + extension length */
+                  *q++ = 0x00 | 0x71; /* for AC3 Audio (specifically on blue-rays) */
+        }
+        if (is_dvb_subtitle) {
+            /* First two fields of DVB subtitles PES data:
+             * data_identifier: for DVB subtitle streams shall be coded with the value 0x20
+             * subtitle_stream_id: for DVB subtitle stream shall be identified by the value 0x00 */
+            *q++ = 0x20;
+            *q++ = 0x00;
+        }
+        if (is_dvb_teletext) {
+            memset(q, 0xff, pes_header_stuffing_bytes);
+            q += pes_header_stuffing_bytes;
+        }
+        payload->is_start = 0;
+    }
+    /* header size */
+    header_len = q - buf;
+    /* data len */
+    len = TS_PACKET_SIZE - header_len;
+    if (len > payload_size)
+        len = payload_size;
+    stuffing_len = TS_PACKET_SIZE - header_len - len;
+    if (stuffing_len > 0) {
+        /* add stuffing with AFC */
+        if (buf[3] & 0x20) {
+            /* stuffing already present: increase its size */
+            afc_len = buf[4] + 1;
+            memmove(buf + 4 + afc_len + stuffing_len,
+                    buf + 4 + afc_len,
+                    header_len - (4 + afc_len));
+            buf[4] += stuffing_len;
+            memset(buf + 4 + afc_len, 0xff, stuffing_len);
+        } else {
+            /* add stuffing */
+            memmove(buf + 4 + stuffing_len, buf + 4, header_len - 4);
+            buf[3] |= 0x20;
+            buf[4]  = stuffing_len - 1;
+            if (stuffing_len >= 2) {
+                buf[5] = 0x00;
+                memset(buf + 6, 0xff, stuffing_len - 2);
+            }
+        }
+    }
+
+    if (is_dvb_subtitle && payload_size == len) {
+        memcpy(buf + TS_PACKET_SIZE - len, payload_chunk, len - 1);
+        buf[TS_PACKET_SIZE - 1] = 0xff; /* end_of_PES_data_field_marker: an 8-bit field with fixed contents 0xff for DVB subtitle */
+    } else {
+        memcpy(buf + TS_PACKET_SIZE - len, payload_chunk, len);
+    }
+
+    mpegts_prefix_m2ts_header(s);
+    avio_write(s->pb, buf, TS_PACKET_SIZE);
+
+    payload->bytes_processed += len;
+    payload->packets_sent++;
+
+    if (!(payload->bytes_processed < payload->size)) {
+        ts_st->prev_payload_key = key;
+    }
 }
 
 int ff_check_h264_startcode(AVFormatContext *s, const AVStream *st, const AVPacket *pkt)
@@ -1245,6 +1254,154 @@ static int check_hevc_startcode(AVFormatContext *s, const AVStream *st, const AV
     return 0;
 }
 
+static void mpegts_write_enqueue_payload(MpegTSWriteStream* ts_st, MpegTSWritePayload* payload)
+{
+    MpegTSWritePayload *last = ts_st->payload;
+    if (!last) {
+        ts_st->payload = payload;
+        return;
+    }
+    while (last->next) {
+        last = last->next;
+    }
+    last->next = payload;
+}
+
+static MpegTSWritePayload *mpegts_write_dequeue_payload(MpegTSWriteStream* ts_st)
+{
+    MpegTSWritePayload *first = ts_st->payload;
+    if (!first) {
+        return NULL;
+    }
+    ts_st->payload = ts_st->payload->next;
+    return first;
+}
+
+static int mpegts_write_get_payload_queue_length(MpegTSWriteStream* ts_st)
+{
+    int len = 0;
+    MpegTSWritePayload* payload = ts_st->payload;
+    while (payload) {
+        payload = payload->next;
+        ++len;
+    }
+    return len;
+}
+
+#define MPEGTS_WRITE_VIDEO_PRELOAD 400000
+
+static int64_t mpegts_write_get_stream_time(AVStream* st)
+{
+    MpegTSWriteStream* ts_st = st->priv_data;
+    MpegTSWritePayload *payload = ts_st->payload;
+    int64_t stream_time;
+    int64_t buffer_last_dts = payload->dts;
+    int buffer_size = payload->size;
+    while (payload = payload->next) {
+        buffer_last_dts = payload->dts;
+        buffer_size += payload->size;
+    }
+    stream_time = ts_st->payload->dts - ts_st->first_dts
+            + (buffer_last_dts - ts_st->payload->dts) * ts_st->payload->bytes_processed / buffer_size;
+    if (st->codec->codec_type != AVMEDIA_TYPE_VIDEO) {
+        stream_time += av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
+    }
+    return stream_time;
+}
+
+#define MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH 20
+#define MPEGTS_WRITE_STREAM_BUFFER_MAX_LENGTH 100
+
+static int64_t mpegts_write_get_max_stream_time(AVFormatContext *s)
+{
+    int i;
+    AVStream *st;
+    MpegTSWriteStream *ts_st;
+    int64_t stream_time;
+    int64_t current_time = 0;
+    for (i = 0; i < s->nb_streams; i++) {
+        st = s->streams[i];
+        ts_st = st->priv_data;
+
+        int len = mpegts_write_get_payload_queue_length(ts_st); // DELETEME
+        av_log(s, AV_LOG_ERROR, "stream %d queue length: %d\n", i, len); // DELETEME
+
+        if (!ts_st->payload) {
+            continue;
+        }
+        stream_time = mpegts_write_get_stream_time(st);
+        if (stream_time > current_time) {
+            current_time = stream_time;
+        }
+    }
+    return current_time;
+}
+
+// Output TS packet for an elementary stream with stream_time < current_time or payload queue length > threshold
+// returns 1 if nothing to send, 0 otherwise
+static int mpegts_write_write_ts_packet_before_time(AVFormatContext *s, int64_t current_time, int flush)
+{
+    AVStream *st;
+    MpegTSWriteStream *ts_st;
+    int i;
+    int min_i = -1;
+    int64_t min_stream_time = current_time;
+    int64_t new_stream_time;
+    // find stream with lowest stream_time:
+    for (i = 0; i < s->nb_streams; i++) {
+        int64_t stream_time;
+        AVStream *st = s->streams[i];
+        MpegTSWriteStream *ts_st = st->priv_data;
+        int len = mpegts_write_get_payload_queue_length(ts_st);
+        // finish if one of the buffers exhausted
+        if (!flush && len < MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH) {
+            return 0;
+        }
+        if (!ts_st->payload) {
+            continue;
+        }
+        stream_time = mpegts_write_get_stream_time(st);
+        if (stream_time < min_stream_time) {
+            min_stream_time = stream_time;
+            min_i = i;
+        }
+    }
+    // if none found, check for streams with queue length exceeding threshold:
+    if (min_i == -1) {
+        for (i = 0; i < s->nb_streams; i++) {
+            AVStream *st = s->streams[i];
+            MpegTSWriteStream *ts_st = st->priv_data;
+            int len = mpegts_write_get_payload_queue_length(ts_st);
+            if (len > MPEGTS_WRITE_STREAM_BUFFER_MAX_LENGTH) {
+                min_i = i;
+                break;
+            }
+        }
+    }
+
+    if (min_i == -1) {
+        return 0; // nothing to send
+    }
+
+    st = s->streams[min_i];
+    ts_st = st->priv_data;
+
+    mpegts_write_ts_packet(s, st);
+
+    new_stream_time = mpegts_write_get_stream_time(st);
+    if (new_stream_time > current_time) {
+        current_time = new_stream_time;
+    }
+
+    if (!(ts_st->payload->bytes_processed < ts_st->payload->size)) {
+        MpegTSWritePayload *payload = mpegts_write_dequeue_payload(ts_st);
+        av_free(payload->data);
+        av_free(payload);
+    }
+    
+    return 1; // TS packet was sent
+}
+
 static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
 {
     AVStream *st = s->streams[pkt->stream_index];
@@ -1253,6 +1410,7 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     uint8_t *data = NULL;
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
+    MpegTSWritePayload* payload;
     const int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE) * 2;
     int64_t dts = pkt->dts, pts = pkt->pts;
 
@@ -1355,70 +1513,45 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
         if (ret < 0)
             return ret;
     }
-
-    if (pkt->dts != AV_NOPTS_VALUE) {
-        int i;
-        for(i=0; i<s->nb_streams; i++) {
-            AVStream *st2 = s->streams[i];
-            MpegTSWriteStream *ts_st2 = st2->priv_data;
-            if (   ts_st2->payload_size
-               && (ts_st2->payload_dts == AV_NOPTS_VALUE || dts - ts_st2->payload_dts > delay/2)) {
-                mpegts_write_pes(s, st2, ts_st2->payload, ts_st2->payload_size,
-                                ts_st2->payload_pts, ts_st2->payload_dts,
-                                ts_st2->payload_flags & AV_PKT_FLAG_KEY);
-                ts_st2->payload_size = 0;
-            }
-        }
+    
+    if (ts_st->first_dts == AV_NOPTS_VALUE) {
+        ts_st->first_dts = pkt->dts;
     }
 
-    if (ts_st->payload_size && (ts_st->payload_size + size > ts->pes_payload_size ||
-        (dts != AV_NOPTS_VALUE && ts_st->payload_dts != AV_NOPTS_VALUE &&
-         av_compare_ts(dts - ts_st->payload_dts, st->time_base,
-                       s->max_delay, AV_TIME_BASE_Q) >= 0))) {
-        mpegts_write_pes(s, st, ts_st->payload, ts_st->payload_size,
-                         ts_st->payload_pts, ts_st->payload_dts,
-                         ts_st->payload_flags & AV_PKT_FLAG_KEY);
-        ts_st->payload_size = 0;
+    // FIXME: what if pkt->dts == AV_NOPTS_VALUE? Concat payloads?
+    if (pkt->dts == AV_NOPTS_VALUE) {
+        av_log(s, AV_LOG_ERROR, "pkt->dts == AV_NOPTS_VALUE"); // DELETEME
     }
-
-    if (st->codec->codec_type != AVMEDIA_TYPE_AUDIO || size > ts->pes_payload_size) {
-        av_assert0(!ts_st->payload_size);
-        // for video and subtitle, write a single pes packet
-        mpegts_write_pes(s, st, buf, size, pts, dts,
-                         pkt->flags & AV_PKT_FLAG_KEY);
+    
+    // Enqueue payload:
+    payload = av_mallocz(sizeof(MpegTSWritePayload));
+    if (!payload) {
         av_free(data);
-        return 0;
+        return AVERROR(ENOMEM);
     }
-
-    if (!ts_st->payload_size) {
-        ts_st->payload_pts   = pts;
-        ts_st->payload_dts   = dts;
-        ts_st->payload_flags = pkt->flags;
+    payload->data = av_mallocz(size);
+    if (!payload->data) {
+        av_free(data);
+        return AVERROR(ENOMEM);
     }
-
-    memcpy(ts_st->payload + ts_st->payload_size, buf, size);
-    ts_st->payload_size += size;
-
+    payload->pts   = pts;
+    payload->dts   = dts;
+    payload->flags = pkt->flags;
+    payload->size  = size;
+    payload->is_start  = 1;
+    payload->packet_num = ts_st->last_packet_num++;
+    memcpy(payload->data, buf, size);
+    mpegts_write_enqueue_payload(ts_st, payload);
     av_free(data);
+
+    while (mpegts_write_write_ts_packet_before_time(s, mpegts_write_get_max_stream_time(s), 0));
 
     return 0;
 }
 
 static void mpegts_write_flush(AVFormatContext *s)
 {
-    int i;
-
-    /* flush current packets */
-    for (i = 0; i < s->nb_streams; i++) {
-        AVStream *st = s->streams[i];
-        MpegTSWriteStream *ts_st = st->priv_data;
-        if (ts_st->payload_size > 0) {
-            mpegts_write_pes(s, st, ts_st->payload, ts_st->payload_size,
-                             ts_st->payload_pts, ts_st->payload_dts,
-                             ts_st->payload_flags & AV_PKT_FLAG_KEY);
-            ts_st->payload_size = 0;
-        }
-    }
+    while (mpegts_write_write_ts_packet_before_time(s, INT64_MAX, 1));
 }
 
 static int mpegts_write_packet(AVFormatContext *s, AVPacket *pkt)
@@ -1443,7 +1576,6 @@ static int mpegts_write_end(AVFormatContext *s)
     for (i = 0; i < s->nb_streams; i++) {
         AVStream *st = s->streams[i];
         MpegTSWriteStream *ts_st = st->priv_data;
-        av_freep(&ts_st->payload);
         if (ts_st->amux) {
             avformat_free_context(ts_st->amux);
             ts_st->amux = NULL;
@@ -1507,9 +1639,6 @@ static const AVOption options[] = {
     { "muxrate", NULL,
       offsetof(MpegTSWrite, mux_rate), AV_OPT_TYPE_INT,
       { .i64 = 1 }, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
-    { "pes_payload_size", "Minimum PES packet payload in bytes",
-      offsetof(MpegTSWrite, pes_payload_size), AV_OPT_TYPE_INT,
-      { .i64 = DEFAULT_PES_PAYLOAD_SIZE }, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     { "mpegts_flags", "MPEG-TS muxing flags",
       offsetof(MpegTSWrite, flags), AV_OPT_TYPE_FLAGS, { .i64 = 0 }, 0, INT_MAX,
       AV_OPT_FLAG_ENCODING_PARAM, "mpegts_flags" },
