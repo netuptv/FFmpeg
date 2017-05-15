@@ -955,6 +955,33 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
         return pkt + 4;
 }
 
+#define MPEGTS_WRITE_VIDEO_PRELOAD 400000
+#define MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH 10
+#define MPEGTS_WRITE_STREAM_BUFFER_MAX_LENGTH 100
+
+static int64_t mpegts_write_get_stream_time(AVStream* st)
+{
+    MpegTSWriteStream* ts_st = st->priv_data;
+    MpegTSWritePayload *payload = ts_st->payload;
+    int64_t stream_time = ts_st->payload->dts - ts_st->first_dts;
+    int64_t buffer_last_dts = payload->dts;
+    int buffer_size = 0;
+    for (int i = 0; i < MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH && payload->next; i++) {
+        buffer_size += payload->size;
+        payload = payload->next;
+        buffer_last_dts = payload->dts;
+    }
+    if (buffer_last_dts != ts_st->payload->dts) {
+        double bitrate = 1.0 * buffer_size / (buffer_last_dts - ts_st->payload->dts);
+        // av_log(NULL, AV_LOG_ERROR, "stream %d bitrate: %f\n", st->index, 90 * 8 * bitrate); // DELETEME
+        stream_time += ts_st->payload->bytes_processed / bitrate;
+    }
+    if (st->codec->codec_type != AVMEDIA_TYPE_VIDEO) {
+        stream_time += av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
+    }
+    return stream_time;
+}
+
 /* Add a PES header to the front of the payload, and segment into an integer
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
@@ -992,7 +1019,7 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
     payload->psi_sent = 1;
 
     write_pcr = 0;
-    if (ts->mux_rate > 1 || (payload->is_start && ts_st->pid == ts_st->service->pcr_pid ) ) // VBR pcr period is based on frames
+    if (ts->mux_rate > 1 || (payload->is_start && ts_st->pid == ts_st->service->pcr_pid)) // VBR pcr period is based on frames
         ts_st->service->pcr_packet_count++;
     if (ts_st->service->pcr_packet_count >=
         ts_st->service->pcr_packet_period) {
@@ -1000,14 +1027,14 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
         write_pcr = 1;
     }
 
-    if (payload->is_start && ts->mux_rate > 1 && dts != AV_NOPTS_VALUE && (dts - get_pcr(ts, s->pb) / 300) > delay) {
-        if ((dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
-            av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - dts-pcr diff too large (%ld msec), resyncing PCR\n", 
-                (dts - get_pcr(ts, s->pb)/300)/90);
-            ts->first_pcr += dts*300 - get_pcr(ts, s->pb);
+    int64_t interpolated_dts = mpegts_write_get_stream_time(st) + ts_st->first_dts;
+    if (ts->mux_rate > 1 && interpolated_dts != AV_NOPTS_VALUE && (interpolated_dts - get_pcr(ts, s->pb) / 300) > delay) {
+        if ((interpolated_dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
+            av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - interpolated_dts-pcr diff too large (%ld msec), resyncing PCR\n", 
+                (interpolated_dts - get_pcr(ts, s->pb)/300)/90);
+            ts->first_pcr += interpolated_dts*300 - get_pcr(ts, s->pb);
         }
         /* pcr insert gets priority over null packet insert */
-
         if (write_pcr && pcr_st) {
             mpegts_insert_pcr_only(s, pcr_st->pid, pcr_st->cc);
         } else {
@@ -1288,75 +1315,33 @@ static int mpegts_write_get_payload_queue_length(MpegTSWriteStream* ts_st)
     return len;
 }
 
-#define MPEGTS_WRITE_VIDEO_PRELOAD 400000
-
-static int64_t mpegts_write_get_stream_time(AVStream* st)
-{
-    MpegTSWriteStream* ts_st = st->priv_data;
-    MpegTSWritePayload *payload = ts_st->payload;
-    int64_t stream_time;
-    int64_t buffer_last_dts = payload->dts;
-    int buffer_size = payload->size;
-    while (payload = payload->next) {
-        buffer_last_dts = payload->dts;
-        buffer_size += payload->size;
-    }
-    stream_time = ts_st->payload->dts - ts_st->first_dts
-            + (buffer_last_dts - ts_st->payload->dts) * ts_st->payload->bytes_processed / buffer_size;
-    if (st->codec->codec_type != AVMEDIA_TYPE_VIDEO) {
-        stream_time += av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
-    }
-    return stream_time;
-}
-
-#define MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH 20
-#define MPEGTS_WRITE_STREAM_BUFFER_MAX_LENGTH 100
-
-static int64_t mpegts_write_get_max_stream_time(AVFormatContext *s)
-{
-    int i;
-    AVStream *st;
-    MpegTSWriteStream *ts_st;
-    int64_t stream_time;
-    int64_t current_time = 0;
-    for (i = 0; i < s->nb_streams; i++) {
-        st = s->streams[i];
-        ts_st = st->priv_data;
-
-        int len = mpegts_write_get_payload_queue_length(ts_st); // DELETEME
-        av_log(s, AV_LOG_ERROR, "stream %d queue length: %d\n", i, len); // DELETEME
-
-        if (!ts_st->payload) {
-            continue;
-        }
-        stream_time = mpegts_write_get_stream_time(st);
-        if (stream_time > current_time) {
-            current_time = stream_time;
-        }
-    }
-    return current_time;
-}
-
-// Output TS packet for an elementary stream with stream_time < current_time or payload queue length > threshold
+// Output TS packets while elementary stream buffers have enough data
 // returns 1 if nothing to send, 0 otherwise
-static int mpegts_write_write_ts_packet_before_time(AVFormatContext *s, int64_t current_time, int flush)
+static int mpegts_write_ts_packets(AVFormatContext *s, int flush)
 {
     AVStream *st;
     MpegTSWriteStream *ts_st;
     int i;
     int min_i = -1;
-    int64_t min_stream_time = current_time;
-    int64_t new_stream_time;
-    // find stream with lowest stream_time:
+    int buffer_underflow = 0;
+    int64_t min_stream_time = INT64_MAX;
+    
+    // check buffers:
     for (i = 0; i < s->nb_streams; i++) {
-        int64_t stream_time;
         AVStream *st = s->streams[i];
         MpegTSWriteStream *ts_st = st->priv_data;
         int len = mpegts_write_get_payload_queue_length(ts_st);
         // finish if one of the buffers exhausted
         if (!flush && len < MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH) {
-            return 0;
+            buffer_underflow = 1;
         }
+    }
+
+    // find stream with lowest stream_time:
+    for (i = 0; i < s->nb_streams && !buffer_underflow; i++) {
+        int64_t stream_time;
+        AVStream *st = s->streams[i];
+        MpegTSWriteStream *ts_st = st->priv_data;
         if (!ts_st->payload) {
             continue;
         }
@@ -1366,6 +1351,7 @@ static int mpegts_write_write_ts_packet_before_time(AVFormatContext *s, int64_t 
             min_i = i;
         }
     }
+    
     // if none found, check for streams with queue length exceeding threshold:
     if (min_i == -1) {
         for (i = 0; i < s->nb_streams; i++) {
@@ -1387,11 +1373,6 @@ static int mpegts_write_write_ts_packet_before_time(AVFormatContext *s, int64_t 
     ts_st = st->priv_data;
 
     mpegts_write_ts_packet(s, st);
-
-    new_stream_time = mpegts_write_get_stream_time(st);
-    if (new_stream_time > current_time) {
-        current_time = new_stream_time;
-    }
 
     if (!(ts_st->payload->bytes_processed < ts_st->payload->size)) {
         MpegTSWritePayload *payload = mpegts_write_dequeue_payload(ts_st);
@@ -1544,14 +1525,14 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     mpegts_write_enqueue_payload(ts_st, payload);
     av_free(data);
 
-    while (mpegts_write_write_ts_packet_before_time(s, mpegts_write_get_max_stream_time(s), 0));
+    while (mpegts_write_ts_packets(s, 0));
 
     return 0;
 }
 
 static void mpegts_write_flush(AVFormatContext *s)
 {
-    while (mpegts_write_write_ts_packet_before_time(s, INT64_MAX, 1));
+    while (mpegts_write_ts_packets(s, 1));
 }
 
 static int mpegts_write_packet(AVFormatContext *s, AVPacket *pkt)
