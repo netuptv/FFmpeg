@@ -1237,10 +1237,9 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
     mpegts_prefix_m2ts_header(s);
     avio_write(s->pb, buf, TS_PACKET_SIZE);
 
-    /* Interpolate stream time as follows:
+    /* Interpolate stream_time as follows:
        len == 0 => stream_time unchanged
        len == buffer_size => stream_time = last_dts - first_dts */
-    av_log(NULL, AV_LOG_ERROR, "stream %d: last_dts %d, first_dts %d, stream_time %d\n", st->index, ts_st->buffer_last_dts, ts_st->first_dts, ts_st->stream_time); // DELETEME
     ts_st->stream_time += len * (ts_st->buffer_last_dts - ts_st->first_dts - ts_st->stream_time) / (ts_st->buffer_size - payload->bytes_processed);
 
     payload->bytes_processed += len;
@@ -1287,7 +1286,6 @@ static void mpegts_write_enqueue_payload(MpegTSWriteStream* ts_st, MpegTSWritePa
     ++ts_st->queue_length;
     ts_st->buffer_size += payload->size;
     ts_st->buffer_last_dts = payload->dts;
-    av_log(NULL, AV_LOG_WARNING, "stream %d, buffer length %d, size %d", ts_st->pid, ts_st->queue_length, ts_st->buffer_size); // DELETEME
     if (!last) {
         ts_st->payload = payload;
         return;
@@ -1307,7 +1305,6 @@ static MpegTSWritePayload *mpegts_write_dequeue_payload(MpegTSWriteStream* ts_st
     --ts_st->queue_length;
     ts_st->buffer_size -= first->size;
     ts_st->payload = ts_st->payload->next;
-    av_log(NULL, AV_LOG_WARNING, "stream %d, buffer length %d, size %d", ts_st->pid, ts_st->queue_length, ts_st->buffer_size); // DELETEME
     return first;
 }
 
