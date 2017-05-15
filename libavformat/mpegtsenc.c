@@ -967,8 +967,6 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
 static int64_t mpegts_write_get_stream_time(AVStream* st)
 {
     MpegTSWriteStream* ts_st = st->priv_data;
-    MpegTSWritePayload *payload = ts_st->payload;
-
     if (st->codec->codec_type != AVMEDIA_TYPE_VIDEO) {
         return ts_st->stream_time + av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
     } else {
@@ -985,6 +983,7 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWritePayload *payload = ts_st->payload;
+    int64_t interpolated_dts;
 
     const uint8_t *payload_chunk = payload->data + payload->bytes_processed;
     int payload_size = payload->size - payload->bytes_processed;
@@ -1021,7 +1020,7 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
         write_pcr = 1;
     }
 
-    int64_t interpolated_dts = mpegts_write_get_stream_time(st) + ts_st->first_dts;
+    interpolated_dts = mpegts_write_get_stream_time(st) + ts_st->first_dts;
     if (ts->mux_rate > 1 && interpolated_dts != AV_NOPTS_VALUE && (interpolated_dts - get_pcr(ts, s->pb) / 300) > delay) {
         if ((interpolated_dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
             av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - interpolated_dts-pcr diff too large (%ld msec), resyncing PCR\n", 
