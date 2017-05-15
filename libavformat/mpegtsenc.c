@@ -231,9 +231,13 @@ typedef struct MpegTSWriteStream {
     int prev_payload_key;
     int64_t bytes_sent;
     int64_t first_dts;
+    int64_t stream_time;
     AVFormatContext *amux;
     AVRational user_tb;
     MpegTSWritePayload *payload;
+    int64_t queue_length;
+    int64_t buffer_size;
+    int64_t buffer_last_dts;
     int last_packet_num;
 } MpegTSWriteStream;
 
@@ -741,6 +745,7 @@ static int mpegts_write_header(AVFormatContext *s)
             if (ret < 0)
                 goto fail;
         }
+        ts_st->first_dts = AV_NOPTS_VALUE;
     }
 
     av_freep(&pids);
@@ -963,23 +968,12 @@ static int64_t mpegts_write_get_stream_time(AVStream* st)
 {
     MpegTSWriteStream* ts_st = st->priv_data;
     MpegTSWritePayload *payload = ts_st->payload;
-    int64_t stream_time = ts_st->payload->dts - ts_st->first_dts;
-    int64_t buffer_last_dts = payload->dts;
-    int buffer_size = 0;
-    for (int i = 0; i < MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH && payload->next; i++) {
-        buffer_size += payload->size;
-        payload = payload->next;
-        buffer_last_dts = payload->dts;
-    }
-    if (buffer_last_dts != ts_st->payload->dts) {
-        double bitrate = 1.0 * buffer_size / (buffer_last_dts - ts_st->payload->dts);
-        // av_log(NULL, AV_LOG_ERROR, "stream %d bitrate: %f\n", st->index, 90 * 8 * bitrate); // DELETEME
-        stream_time += ts_st->payload->bytes_processed / bitrate;
-    }
+
     if (st->codec->codec_type != AVMEDIA_TYPE_VIDEO) {
-        stream_time += av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
+        return ts_st->stream_time + av_rescale(MPEGTS_WRITE_VIDEO_PRELOAD, 90000, AV_TIME_BASE);
+    } else {
+        return ts_st->stream_time;
     }
-    return stream_time;
 }
 
 /* Add a PES header to the front of the payload, and segment into an integer
@@ -1243,6 +1237,12 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
     mpegts_prefix_m2ts_header(s);
     avio_write(s->pb, buf, TS_PACKET_SIZE);
 
+    /* Interpolate stream time as follows:
+       len == 0 => stream_time unchanged
+       len == buffer_size => stream_time = last_dts - first_dts */
+    av_log(NULL, AV_LOG_ERROR, "stream %d: last_dts %d, first_dts %d, stream_time %d\n", st->index, ts_st->buffer_last_dts, ts_st->first_dts, ts_st->stream_time); // DELETEME
+    ts_st->stream_time += len * (ts_st->buffer_last_dts - ts_st->first_dts - ts_st->stream_time) / (ts_st->buffer_size - payload->bytes_processed);
+
     payload->bytes_processed += len;
     payload->packets_sent++;
 
@@ -1284,6 +1284,10 @@ static int check_hevc_startcode(AVFormatContext *s, const AVStream *st, const AV
 static void mpegts_write_enqueue_payload(MpegTSWriteStream* ts_st, MpegTSWritePayload* payload)
 {
     MpegTSWritePayload *last = ts_st->payload;
+    ++ts_st->queue_length;
+    ts_st->buffer_size += payload->size;
+    ts_st->buffer_last_dts = payload->dts;
+    av_log(NULL, AV_LOG_WARNING, "stream %d, buffer length %d, size %d", ts_st->pid, ts_st->queue_length, ts_st->buffer_size); // DELETEME
     if (!last) {
         ts_st->payload = payload;
         return;
@@ -1300,7 +1304,10 @@ static MpegTSWritePayload *mpegts_write_dequeue_payload(MpegTSWriteStream* ts_st
     if (!first) {
         return NULL;
     }
+    --ts_st->queue_length;
+    ts_st->buffer_size -= first->size;
     ts_st->payload = ts_st->payload->next;
+    av_log(NULL, AV_LOG_WARNING, "stream %d, buffer length %d, size %d", ts_st->pid, ts_st->queue_length, ts_st->buffer_size); // DELETEME
     return first;
 }
 
