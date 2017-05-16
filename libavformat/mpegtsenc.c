@@ -1161,15 +1161,15 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
  * NOTE: 'payload' contains a complete PES payload. */
-static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
-                             const uint8_t * payload, int payload_size,
-                             int64_t pts, int64_t dts, const int key, const int stream_id)
+static int mpegts_write_pes1(const AVFormatContext *s, const AVStream *st,
+                             const uint8_t * const payload, const int payload_size,
+                             int64_t pts, int64_t dts, const int key, const int stream_id, int is_start)
 {
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWrite *ts = s->priv_data;
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
-    int val, is_start, len, header_len, write_pcr;
+    int val, len, header_len, write_pcr;
     const int is_dvb_subtitle = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE);
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
@@ -1180,10 +1180,11 @@ static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
         force_pat = 1;
     }
 
-    is_start = 1;
-    while (payload_size > 0) {
-        retransmit_si_info(s, force_pat, dts);
+    if(!is_start)
         force_pat = 0;
+
+    if (1) {
+        retransmit_si_info(s, force_pat, dts);
 
         write_pcr = 0;
         if (ts_st->pid == ts_st->service->pcr_pid) {
@@ -1204,7 +1205,7 @@ static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
             else
                 mpegts_insert_null_packet(s);
             /* recalculate write_pcr and possibly retransmit si_info */
-            continue;
+            return 0;
         }
 
         /* prepare packet header */
@@ -1409,13 +1410,28 @@ static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
             memcpy(buf + TS_PACKET_SIZE - len, payload, len);
         }
 
-        payload      += len;
-        payload_size -= len;
         mpegts_prefix_m2ts_header(s);
         avio_write(s->pb, buf, TS_PACKET_SIZE);
     }
-    ts_st->prev_payload_key = key;
+    if(len>=payload_size){
+        ts_st->prev_payload_key = key;
+    }
+    return FFMIN(len, payload_size);
 }
+
+static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
+                             const uint8_t * payload, int payload_size,
+                             int64_t pts, int64_t dts, const int key, const int stream_id)
+{
+    int is_start = 1;
+    do{
+        int len = mpegts_write_pes1(s, st, payload, payload_size, pts, dts, key, stream_id, is_start);
+        payload += len;
+        payload_size -= len;
+        is_start = 0;
+    }while(payload_size>0);
+}
+
 
 int ff_check_h264_startcode(AVFormatContext *s, const AVStream *st, const AVPacket *pkt)
 {
