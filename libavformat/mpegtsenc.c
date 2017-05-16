@@ -81,6 +81,7 @@ typedef struct MpegTSWrite {
     int onid;
     int tsid;
     int64_t first_pcr;
+    int64_t first_dts;
     int mux_rate; ///< set to 1 when VBR
 
     int transport_stream_id;
@@ -230,7 +231,6 @@ typedef struct MpegTSWriteStream {
     int first_pts_check; ///< first pts check needed
     int prev_payload_key;
     int64_t bytes_sent;
-    int64_t first_dts;
     int64_t stream_time;
     AVFormatContext *amux;
     AVRational user_tb;
@@ -669,6 +669,7 @@ static int mpegts_write_header(AVFormatContext *s)
         ret = AVERROR(ENOMEM);
         goto fail;
     }
+    ts->first_dts = AV_NOPTS_VALUE;
 
     /* assign pids to each stream */
     for (i = 0; i < s->nb_streams; i++) {
@@ -745,7 +746,6 @@ static int mpegts_write_header(AVFormatContext *s)
             if (ret < 0)
                 goto fail;
         }
-        ts_st->first_dts = AV_NOPTS_VALUE;
     }
 
     av_freep(&pids);
@@ -1020,7 +1020,7 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
         write_pcr = 1;
     }
 
-    interpolated_dts = mpegts_write_get_stream_time(st) + ts_st->first_dts;
+    interpolated_dts = mpegts_write_get_stream_time(st) + ts->first_dts;
     if (ts->mux_rate > 1 && interpolated_dts != AV_NOPTS_VALUE && (interpolated_dts - get_pcr(ts, s->pb) / 300) > delay) {
         if ((interpolated_dts - get_pcr(ts, s->pb) / 300) > 2*FFMAX(delay,90000/2)) {
             av_log(s, AV_LOG_WARNING, "Can't maintain specified mux_rate - interpolated_dts-pcr diff too large (%ld msec), resyncing PCR\n", 
@@ -1239,7 +1239,7 @@ static void mpegts_write_ts_packet(AVFormatContext *s, AVStream *st)
     /* Interpolate stream_time as follows:
        len == 0 => stream_time unchanged
        len == buffer_size => stream_time = last_dts - first_dts */
-    ts_st->stream_time += len * (ts_st->buffer_last_dts - ts_st->first_dts - ts_st->stream_time) / (ts_st->buffer_size - payload->bytes_processed);
+    ts_st->stream_time += len * (ts_st->buffer_last_dts - ts->first_dts - ts_st->stream_time) / (ts_st->buffer_size - payload->bytes_processed);
 
     payload->bytes_processed += len;
     payload->packets_sent++;
@@ -1498,8 +1498,8 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
             return ret;
     }
     
-    if (ts_st->first_dts == AV_NOPTS_VALUE) {
-        ts_st->first_dts = pkt->dts;
+    if (ts->first_dts == AV_NOPTS_VALUE) {
+        ts->first_dts = pkt->dts;
     }
 
     // FIXME: what if pkt->dts == AV_NOPTS_VALUE? Concat payloads?
