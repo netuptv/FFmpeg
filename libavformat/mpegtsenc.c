@@ -1161,16 +1161,16 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
  * NOTE: 'payload' contains a complete PES payload. */
-static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
-                             const uint8_t *payload, int payload_size,
-                             int64_t pts, int64_t dts, int key, int stream_id)
+static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
+                             const uint8_t * payload, int payload_size,
+                             int64_t pts, int64_t dts, const int key, const int stream_id)
 {
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWrite *ts = s->priv_data;
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
-    int val, is_start, len, header_len, write_pcr, is_dvb_subtitle, is_dvb_teletext, flags;
-    int afc_len, stuffing_len;
+    int val, is_start, len, header_len, write_pcr;
+    const int is_dvb_subtitle = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE);
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
     int force_pat = st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && key && !ts_st->prev_payload_key;
@@ -1249,8 +1249,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             *q++ = 0x00;
             *q++ = 0x00;
             *q++ = 0x01;
-            is_dvb_subtitle = 0;
-            is_dvb_teletext = 0;
+            int is_dvb_teletext = 0;
             if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                 if (st->codecpar->codec_id == AV_CODEC_ID_DIRAC)
                     *q++ = 0xfd;
@@ -1276,15 +1275,13 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             } else {
                 *q++ = 0xbd;
                 if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
-                    if (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE) {
-                        is_dvb_subtitle = 1;
-                    } else if (st->codecpar->codec_id == AV_CODEC_ID_DVB_TELETEXT) {
+                    if (st->codecpar->codec_id == AV_CODEC_ID_DVB_TELETEXT) {
                         is_dvb_teletext = 1;
                     }
                 }
             }
             header_len = 0;
-            flags      = 0;
+            int flags      = 0;
             if (pts != AV_NOPTS_VALUE) {
                 header_len += 5;
                 flags      |= 0x80;
@@ -1323,7 +1320,6 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             /* 3 extra bytes should be added to DVB subtitle payload: 0x20 0x00 at the beginning and trailing 0xff */
             if (is_dvb_subtitle) {
                 len += 3;
-                payload_size++;
             }
             if (len > 0xffff)
                 len = 0;
@@ -1382,15 +1378,13 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         /* header size */
         header_len = q - buf;
         /* data len */
-        len = TS_PACKET_SIZE - header_len;
-        if (len > payload_size)
-            len = payload_size;
-        stuffing_len = TS_PACKET_SIZE - header_len - len;
+        len = FFMIN(TS_PACKET_SIZE - header_len, payload_size + (is_dvb_subtitle?1:0) );
+        int stuffing_len = TS_PACKET_SIZE - header_len - len;
         if (stuffing_len > 0) {
             /* add stuffing with AFC */
             if (buf[3] & 0x20) {
                 /* stuffing already present: increase its size */
-                afc_len = buf[4] + 1;
+                int afc_len = buf[4] + 1;
                 memmove(buf + 4 + afc_len + stuffing_len,
                         buf + 4 + afc_len,
                         header_len - (4 + afc_len));
@@ -1408,7 +1402,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             }
         }
 
-        if (is_dvb_subtitle && payload_size == len) {
+        if (is_dvb_subtitle && payload_size+1 == len) {
             memcpy(buf + TS_PACKET_SIZE - len, payload, len - 1);
             buf[TS_PACKET_SIZE - 1] = 0xff; /* end_of_PES_data_field_marker: an 8-bit field with fixed contents 0xff for DVB subtitle */
         } else {
