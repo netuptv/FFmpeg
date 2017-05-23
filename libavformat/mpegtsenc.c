@@ -1333,6 +1333,9 @@ static int mpegts_write_ts_packets(AVFormatContext *s, int flush)
     for (i = 0; i < s->nb_streams; i++) {
         AVStream *st = s->streams[i];
         MpegTSWriteStream *ts_st = st->priv_data;
+        if (!ts_st->payload) {
+            continue;
+        } // no data in this elementary stream available, skip it
         int len = mpegts_write_get_payload_queue_length(ts_st);
         // finish if one of the buffers exhausted
         if (!flush && len < MPEGTS_WRITE_STREAM_BUFFER_MIN_LENGTH) {
