@@ -868,7 +868,7 @@ static void new_pes_packet(PESContext *pes, AVPacket *pkt)
     if (pes->total_size != MAX_PES_PAYLOAD &&
         pes->pes_header_size + pes->data_index != pes->total_size +
         PES_START_SIZE) {
-        av_log(pes->stream, AV_LOG_WARNING, "PES packet size mismatch\n");
+        av_log(pes->stream, AV_LOG_WARNING, "PES packet size mismatch in PID %d\n", pes->pid);
         pes->flags |= AV_PKT_FLAG_CORRUPT;
     }
     memset(pkt->data + pkt->size, 0, FF_INPUT_BUFFER_PADDING_SIZE);
@@ -2194,7 +2194,7 @@ static int handle_packet(MpegTSContext *ts, const uint8_t *packet)
 
     tss->last_cc = cc;
     if (!cc_ok) {
-        av_log(ts->stream, AV_LOG_DEBUG,
+        av_log(ts->stream, AV_LOG_WARNING,
                "Continuity check failed for pid %d expected %d got %d\n",
                pid, expected_cc, cc);
         if (tss->type == MPEGTS_PES) {
