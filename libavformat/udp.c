@@ -1006,6 +1006,7 @@ void* do_udp_send_thr(void *arg)
     // We can take a rate limit of approximately 500 us per packet to avoid enormous traffic bursts
     const int64_t min_gap = 500;
     int64_t gap = 0;
+    int overflow = 0;
 
 	av_log(NULL, AV_LOG_INFO, "[%p] udp:equalizer thread started\n", s);
 	while (!s->exit) {
@@ -1016,14 +1017,18 @@ void* do_udp_send_thr(void *arg)
 
         pthread_mutex_lock(&s->lock);
         if (s->muxrate && s->queue_size_bytes > 2 * s->muxrate * delay / 8 / 1000000) { // s->muxrate * delay / 8 / 1000000 is delay in bytes
-            stream_time = 0; // send packet immediately in case of overflow
+            overflow = 1;
             av_log(NULL, AV_LOG_WARNING, 
-                "Queue overflow: %d packets, %"PRId64" mbytes, sending instantly. Check 'muxrate' value\n", 
-                s->queue_length, s->queue_size_bytes / 1000000);
+                "Queue overflow: %d packets, %"PRId64" Kbytes, sending data at max rate. Check 'muxrate' value, may be too low\n", 
+                s->queue_length, s->queue_size_bytes / 1000);
+        }
+        if (s->muxrate && overflow && s->muxrate && s->queue_size_bytes < s->muxrate * delay / 8 / 1000000) {
+            av_log(NULL, AV_LOG_WARNING, "Stopped sending data at max rate, overflow fixed\n");
+            overflow = 0;
         }
         pthread_mutex_unlock(&s->lock);
 
-        if (stream_time > time_passed) {
+        if (!overflow && stream_time > time_passed) {
             int64_t time_to_sleep = stream_time - time_passed;
             // sleep at most 100 ms so the loop can exit fast
             usleep(time_to_sleep < 100000 ? time_to_sleep : 100000);
