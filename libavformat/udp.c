@@ -1058,7 +1058,7 @@ void* do_udp_send_thr(void *arg)
 		pthread_mutex_unlock(&s->lock);
 
         gap = av_gettime() - last_send_time;
-        if (gap < min_gap) {
+        if (!overflow && gap < min_gap) {
             usleep(min_gap - gap);
         }
 
