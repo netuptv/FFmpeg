@@ -26,6 +26,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/opt.h"
+#include "libavutil/time.h"
 
 #include "libavcodec/internal.h"
 
@@ -60,6 +61,9 @@ typedef struct MpegTSService {
     int pcr_packet_count;
     int pcr_packet_period;
     AVProgram *program;
+
+    int64_t last_pat;
+    int64_t last_pcr;
 } MpegTSService;
 
 // service_type values as defined in ETSI 300 468
@@ -227,6 +231,20 @@ static int mpegts_write_section1(MpegTSSection *s, int tid, int id,
 #define PAT_RETRANS_TIME 100
 #define PCR_RETRANS_TIME 20
 
+typedef struct MpegTSPesPacket {
+    uint8_t *payload;
+    int payload_size;
+    int64_t pts;
+    int64_t dts;
+    int key;
+    int stream_id;
+    //
+    struct MpegTSPesPacket* next;
+    int64_t start_streamtime;
+    int64_t end_streamtime;
+    int consumed;
+}MpegTSPesPacket;
+
 typedef struct MpegTSWriteStream {
     struct MpegTSService *service;
     int pid; /* stream associated pid */
@@ -245,6 +263,11 @@ typedef struct MpegTSWriteStream {
     /* For Opus */
     int opus_queued_samples;
     int opus_pending_trim_start;
+    //
+    MpegTSPesPacket* packets_first;
+    MpegTSPesPacket* packets_last;
+    int64_t stream_time; // FIXME: init with nopts
+    int pes_buffered;
 } MpegTSWriteStream;
 
 static void mpegts_write_pat(AVFormatContext *s)
@@ -1163,7 +1186,7 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
  * NOTE: 'payload' contains a complete PES payload. */
 static int mpegts_write_pes1(const AVFormatContext *s, const AVStream *st,
                              const uint8_t * const payload, const int payload_size,
-                             int64_t pts, int64_t dts, const int key, const int stream_id, int is_start)
+                             int64_t pts, int64_t dts, const int key, const int stream_id, int is_start, int64_t service_time)
 {
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWrite *ts = s->priv_data;
@@ -1230,14 +1253,25 @@ static int mpegts_write_pes1(const AVFormatContext *s, const AVStream *st,
             set_af_flag(buf, 0x40);
             q = get_ts_payload_start(buf);
         }
-        if (write_pcr) {
+        //if (write_pcr) {
+        if(ts_st->pid == ts_st->service->pcr_pid &&
+                //avio_tell(s->pb)-ts_st->service->last_pcr>1316*2){
+                service_time-ts_st->service->last_pcr > 8000*300){
+            //if(service_time < ts_st->service->last_pcr)
+            //    av_log(s, AV_LOG_ERROR, "XXX!!!");
+            ts_st->service->last_pcr = service_time;
+            //ts_st->service->last_pcr = avio_tell(s->pb);
+
             set_af_flag(buf, 0x10);
             q = get_ts_payload_start(buf);
+
             // add 11, pcr references the last byte of program clock reference base
             if (ts->mux_rate > 1)
                 pcr = get_pcr(ts, s->pb);
             else
                 pcr = (dts - delay) * 300;
+
+            pcr = service_time;// * 300;// - 90000*300/2; // FIXME:
             if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
                 av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
             extend_af(buf, write_pcr_bits(q, pcr));
@@ -1419,17 +1453,145 @@ static int mpegts_write_pes1(const AVFormatContext *s, const AVStream *st,
     return FFMIN(len, payload_size);
 }
 
+static void calc_stream_times(AVStream *st, MpegTSWriteStream* ts_st)
+{
+    int64_t buffered_dts = ts_st->packets_last->dts - ts_st->packets_first->dts;
+    if(buffered_dts>90000*10){
+        av_log(NULL, AV_LOG_ERROR, "buffered %f sec!!!\n", buffered_dts/90000.0);
+    }
+    if(buffered_dts<0){
+        av_log(NULL, AV_LOG_ERROR, "WTF: buffered %f sec!!!\n", buffered_dts/90000.0);
+    }
+    if( buffered_dts < 90000*3 || buffered_dts < 90000*4 && !ts_st->pes_buffered) {
+        ts_st->pes_buffered = 0;
+        return;
+    }
+    ts_st->pes_buffered = 1;
+
+    MpegTSPesPacket *end = ts_st->packets_first;//->next;
+    int64_t bytes=0;
+    int64_t min_time = ts_st->stream_time + 100L*90000*300;
+    while(end && end->dts*300L-ts_st->stream_time<90000L*300*1){ // FIXME
+        bytes += end->payload_size - end->consumed;
+        int64_t time = ts_st->stream_time +
+                (300L*end->dts-ts_st->stream_time) * (ts_st->packets_first->payload_size-ts_st->packets_first->consumed) / bytes;
+        min_time = FFMIN(min_time, time);
+        end = end->next;
+    }
+    // FIXME: remove this
+    //if(!ts_st->packets_first->end_streamtime)
+        ts_st->packets_first->end_streamtime = min_time;
+    if(!ts_st->packets_first->start_streamtime)
+        ts_st->packets_first->start_streamtime = ts_st->stream_time;
+    /*
+    if(ts_st->packets_first->end_streamtime<ts_st->packets_first->start_streamtime)
+        av_log(NULL, AV_LOG_ERROR, "DIFF instream %d!!!\n", st->index);
+    //int64_t bw = ts_st->packets_first->payload_size*8*90000*300/1000/( ts_st->packets_first->end_streamtime-ts_st->packets_first->start_streamtime);
+    int64_t bw = ((int64_t)ts_st->packets_first->payload_size)*8*90*300/1/( ts_st->packets_first->end_streamtime-ts_st->packets_first->start_streamtime);
+    av_log(NULL, AV_LOG_ERROR, "%d: bandwidth %4ld Kbit/s!!!\n", st->index, bw);
+    */
+}
+
 static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
                              const uint8_t * payload, int payload_size,
                              int64_t pts, int64_t dts, const int key, const int stream_id)
 {
+#if 1
+    //av_log(s, AV_LOG_ERROR, "WRITEPES!!!");
+    MpegTSPesPacket* pes_packet = av_mallocz(sizeof(MpegTSPesPacket));
+    pes_packet->payload = av_malloc(payload_size);
+    memcpy(pes_packet->payload, payload, payload_size);
+    pes_packet->payload_size = payload_size;
+    pes_packet->pts = pts;
+    pes_packet->dts = dts;
+    pes_packet->key = key;
+    pes_packet->stream_id = stream_id;
+
+    MpegTSWriteStream *ts_st = st->priv_data;
+    if(ts_st->packets_last){
+        //av_log(s, AV_LOG_ERROR, "%3d stream DIFF %4ld, buffered %ld\n", st->index, pes_packet->dts-ts_st->packets_last->dts,
+        //    ts_st->packets_last->dts - ts_st->packets_first->dts);
+        ts_st->packets_last->next = pes_packet;
+        ts_st->packets_last = pes_packet;
+    }else{
+        ts_st->packets_first = pes_packet;
+        ts_st->packets_last = pes_packet;
+        ts_st->stream_time = 300L*pes_packet->dts-1;//3600; // FIXME:
+    }
+
+    // recalc start/end time
+    calc_stream_times(st, ts_st);
+
+
+
+
+    while(1){ // stream all complete packets
+        // select lowest ES
+        AVStream *st1=NULL;
+        MpegTSWriteStream *ts_st1 = NULL;
+        for(int i=0; i<s->nb_streams; i++){
+            AVStream *st2=s->streams[i];
+            MpegTSWriteStream *ts_st2 = st2->priv_data;
+            if(!st1 || ts_st2->stream_time < ts_st1->stream_time) {
+                st1 = st2;
+                ts_st1 = ts_st2;
+            }
+        }
+        //if(!ts_st1->stream_time) return;
+        if(!ts_st1->packets_first) break;
+        if(!ts_st1->packets_first->end_streamtime) break;
+
+        static int64_t tmp_start = 0;
+        static int64_t tmp_startS;
+        if(tmp_start==0){
+            tmp_start = av_gettime_relative()+2000000;
+            tmp_startS= ts_st1->stream_time;
+        }
+        int64_t tmp_diff = (ts_st1->stream_time-tmp_startS)/9/3-(av_gettime_relative()-tmp_start);
+        //av_log(s, AV_LOG_ERROR, "delay %ld!!!\n", tmp_diff);
+        if(tmp_diff>0){
+            //av_usleep(tmp_diff);
+            //return;
+        }
+
+        MpegTSPesPacket* pes_packet1 = ts_st1->packets_first;
+        int64_t stream_time = pes_packet1->start_streamtime + (pes_packet1->end_streamtime-pes_packet1->start_streamtime)*pes_packet1->consumed/pes_packet1->payload_size;
+        // FIXME: remove this FFMAX-hack
+        //stream_time = FFMAX(stream_time, ts_st1->stream_time);
+        int len = mpegts_write_pes1(s, st1,
+                                    pes_packet1->payload + pes_packet1->consumed,
+                                    pes_packet1->payload_size - pes_packet1->consumed,
+                                    pes_packet1->pts,
+                                    pes_packet1->dts,
+                                    pes_packet1->key,
+                                    pes_packet1->stream_id,
+                                    pes_packet1->consumed==0,
+                                    stream_time
+                                    );
+        // FIXME: remove this FFMAX-hack
+        //ts_st1->stream_time = FFMAX(ts_st1->stream_time, pes_packet1->start_streamtime + (pes_packet1->end_streamtime-pes_packet1->start_streamtime)*pes_packet1->consumed/pes_packet1->payload_size);
+        ts_st1->stream_time = pes_packet1->start_streamtime + (pes_packet1->end_streamtime-pes_packet1->start_streamtime)*pes_packet1->consumed/pes_packet1->payload_size;
+        pes_packet1->consumed += len;
+        if(pes_packet1->consumed==pes_packet1->payload_size){
+            ts_st1->packets_first = pes_packet1->next;
+            if(ts_st1->packets_last == pes_packet1)
+                ts_st1->packets_last = NULL;
+
+            av_free(pes_packet1->payload);
+            av_free(pes_packet1);
+            calc_stream_times(st1, ts_st1);
+        }
+
+    }
+#else
     int is_start = 1;
     do{
-        int len = mpegts_write_pes1(s, st, payload, payload_size, pts, dts, key, stream_id, is_start);
+        int len = mpegts_write_pes1(s, st, payload, payload_size, pts, dts, key, stream_id, is_start, 0);
         payload += len;
         payload_size -= len;
         is_start = 0;
     }while(payload_size>0);
+#endif
 }
 
 
