@@ -1159,8 +1159,18 @@ void* do_udp_send_thr(void *arg)
 
 		need2sleep = wake_time - av_gettime();
 		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time=%lld (need2sleep=%lld)\n", s, wake_time, need2sleep );
-		if( need2sleep < 2*UDP_EQ_INTERVAL && need2sleep > 0 )
-			usleep( need2sleep );
+		if ( need2sleep < 2 * UDP_EQ_INTERVAL && need2sleep > 0 )
+                {
+                    int sleep_time = 0;
+                    while (sleep_time < need2sleep && !s->exit)
+                    {
+                        int small_sleep_time = 10000;
+                        if (need2sleep < small_sleep_time)
+                            small_sleep_time = need2sleep;
+                        usleep(small_sleep_time);
+                        sleep_time += small_sleep_time;
+                    }
+                }
 	
 		// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread wake_time usleep done. try pthread_mutex_lock \n");
 		pthread_mutex_lock(&s->lock);
@@ -1200,7 +1210,17 @@ void* do_udp_send_thr(void *arg)
 			// av_log(NULL, AV_LOG_ERROR, "[%p] udp:equalizer:thread processing pkt->time2send=%lld need_sleep=%lld \n", s, pkt->time2send, pkt->time2send - av_gettime()  );
 			need2sleep = pkt->time2send - av_gettime();
 			if( pkt->time2send < next_time && need2sleep > 0 )
-				usleep( need2sleep );
+                        {
+                            int sleep_time = 0;
+                            while (sleep_time < need2sleep && !s->exit)
+                            {
+                                int small_sleep_time = 10000;
+                                if (need2sleep < small_sleep_time)
+                                    small_sleep_time = need2sleep;
+                                usleep(small_sleep_time);
+                                sleep_time += small_sleep_time;
+                            }
+                        }
 
 			udp_send(h, pkt->buf, pkt->size);
 			pkt2del = pkt;
