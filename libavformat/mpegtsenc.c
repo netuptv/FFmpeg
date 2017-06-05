@@ -886,6 +886,8 @@ static int mpegts_init(AVFormatContext *s)
         }
         st->priv_data = ts_st;
 
+        ts_st->stream_time = INT64_MAX; // FIXME: check this
+
         ts_st->user_tb = st->time_base;
         avpriv_set_pts_info(st, 33, 1, 90000);
 
@@ -1584,7 +1586,7 @@ static void drain_interleaving_buffer(AVFormatContext *s, int flush){
 
             if(ts_st2->buffer_duration_dts>90000*5){ // overflow!
                 flush = 1; // TODO: high water
-                av_log(s, AV_LOG_ERROR, "[pid 0x%x] overflow! flushing\n", ts_st2->pid);
+                //av_log(s, AV_LOG_ERROR, "[pid 0x%x] overflow! flushing\n", ts_st2->pid);
             }
             if(ts_st2->buffer_duration_dts>90000*4){
                 should_stream = 1; // FIXME: temporary
@@ -1598,7 +1600,7 @@ static void drain_interleaving_buffer(AVFormatContext *s, int flush){
                 ts_st = ts_st2;
             }
         }
-        if(!should_stream) return;
+        if(!should_stream && !flush) return;
         //if(!ts_st1->stream_time) return;
         if(!ts_st->packets_first) break;
         if(!ts_st->packets_first->end_streamtime) {
