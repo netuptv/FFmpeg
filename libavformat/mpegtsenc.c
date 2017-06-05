@@ -1488,29 +1488,31 @@ static int mpegts_write_pes1(const AVFormatContext *s, const AVStream *st,
 
 const int64_t DTS_WRAP_THRESHOLD = 90000*10;
 
-static void calc_stream_times(AVStream *st, int flush)
+static void calc_stream_times(AVFormatContext *s, AVStream *st, int flush)
 {
     MpegTSWriteStream* ts_st = st->priv_data;
-
     int64_t buffered_dts = ts_st->buffer_duration_dts;
+
     if(buffered_dts>90000*10){
-        av_log(NULL, AV_LOG_ERROR, "buffered %f sec!!!\n", buffered_dts/90000.0);
+        av_log(s, AV_LOG_ERROR, "buffered %f sec!!!\n", buffered_dts/90000.0);
     }
     if(buffered_dts<0){
-        av_log(NULL, AV_LOG_ERROR, "WTF: buffered %f sec!!!\n", buffered_dts/90000.0);
+        av_log(s, AV_LOG_ERROR, "WTF: buffered %f sec!!!\n", buffered_dts/90000.0);
     }
     if( buffered_dts < 90000*3 || buffered_dts < 90000*4 && !ts_st->pes_buffered) {
         if(ts_st->pes_buffered){
             ts_st->pes_buffered = 0;
-            av_log(NULL, AV_LOG_ERROR, "[pid 0x%x] buffering [START ] %7.3f ms\n", ts_st->pid, buffered_dts/90000.0);
+            if(!flush) // buffer underflow expected when flushing
+                av_log(s, AV_LOG_ERROR, "[pid 0x%x] buffering [START ] %7.3f ms\n", ts_st->pid, buffered_dts/90000.0);
         }
         if(!flush)
             return;
     }else if(!ts_st->pes_buffered){
-        av_log(NULL, AV_LOG_ERROR, "[pid 0x%x] buffering [END   ] %7.3f ms\n", ts_st->pid, buffered_dts/90000.0);
+        av_log(s, AV_LOG_ERROR, "[pid 0x%x] buffering [END   ] %7.3f ms\n", ts_st->pid, buffered_dts/90000.0);
         ts_st->pes_buffered = 1;
     }
 
+#if 0
     MpegTSPesPacket *end = ts_st->packets_first;//->next;
     int64_t bytes=0;
     //int64_t time=0;
@@ -1519,30 +1521,75 @@ static void calc_stream_times(AVStream *st, int flush)
     while(end && end->dts*300L-ts_st->stream_time<90000L*300*1){ // FIXME
         bytes += end->payload_size - end->consumed;
         int64_t time = ts_st->stream_time +
+                //(300L*end->dts-ts_st->packets_first->start_streamtime) * (ts_st->packets_first->payload_size-ts_st->packets_first->consumed) / bytes;
                 (300L*end->dts-ts_st->stream_time) * (ts_st->packets_first->payload_size-ts_st->packets_first->consumed) / bytes;
         min_time = FFMIN(min_time, time);
         end = end->next;
     }
     ts_st->packets_first->end_streamtime = min_time;
-    av_log(NULL, AV_LOG_ERROR, "[pid 0x%x] endtime DIFF %5.3f sec\n", ts_st->pid,
-           (ts_st->packets_first->dts*300-ts_st->packets_first->end_streamtime)/90000.0/300 );
+#else
+    MpegTSPesPacket *end = ts_st->packets_first;
+    int64_t bytes=0;
+    int64_t duration=0;
+    int64_t min_time = ts_st->packets_first->start_streamtime;
+    int64_t max_time = ts_st->packets_first->dts*300LL;
+    int64_t prev_dts = ts_st->packets_first->start_streamtime;
+    while(end && duration<90000L*300*10){ // FIXME
+        bytes += end->payload_size;
+        if(300*end->dts-prev_dts < 300*DTS_WRAP_THRESHOLD){ // FIXME: what else? += prev delta?
+            duration += 300*end->dts-prev_dts;
+        }
+
+        int64_t time = ts_st->packets_first->start_streamtime +
+                duration * ts_st->packets_first->payload_size / bytes;
+        if(time<min_time){
+            max_time = FFMIN(max_time, min_time);
+            //av_log(s, AV_LOG_ERROR, "[pid 0x%x] INTERESTING1\n", ts_st->pid);
+            break;
+        }else{
+            max_time = FFMIN(max_time, time);
+            int64_t WINDOW = 90000L*300/2; //FIXME: const
+            if(duration>WINDOW){
+                int64_t time = ts_st->packets_first->start_streamtime +
+                        (duration-WINDOW) * ts_st->packets_first->payload_size / bytes;
+                min_time = FFMAX(min_time, time);
+            }
+        }
+        prev_dts = 300*end->dts;
+        end = end->next;
+    }
+    ts_st->packets_first->end_streamtime = max_time;
+#endif
+    //av_log(s, AV_LOG_ERROR, "[pid 0x%x] endtime DIFF %5.3f sec\n", ts_st->pid,
+    //       (ts_st->packets_first->dts*300-ts_st->packets_first->end_streamtime)/90000.0/300 );
     /*
     if(ts_st->packets_first->end_streamtime<ts_st->packets_first->start_streamtime)
         av_log(NULL, AV_LOG_ERROR, "DIFF instream %d!!!\n", st->index);
     //int64_t bw = ts_st->packets_first->payload_size*8*90000*300/1000/( ts_st->packets_first->end_streamtime-ts_st->packets_first->start_streamtime);
     int64_t bw = ((int64_t)ts_st->packets_first->payload_size)*8*90*300/1/( ts_st->packets_first->end_streamtime-ts_st->packets_first->start_streamtime);
-    av_log(NULL, AV_LOG_ERROR, "%d: bandwidth %4ld Kbit/s!!!\n", st->index, bw);
+    av_log(s, AV_LOG_ERROR, "%d: bandwidth %4ld Kbit/s!!!\n", st->index, bw);
     */
 }
 
-static void drain_interleaving_buffer(const AVFormatContext *s, int flush){
+static void drain_interleaving_buffer(AVFormatContext *s, int flush){
     while(1){ // stream all complete packets
         // select lowest ES
         AVStream *st=NULL;
         MpegTSWriteStream *ts_st = NULL;
+        int should_stream = flush;
+
         for(int i=0; i<s->nb_streams; i++){
             AVStream *st2=s->streams[i];
             MpegTSWriteStream *ts_st2 = st2->priv_data;
+
+            if(ts_st2->buffer_duration_dts>90000*5){ // overflow!
+                flush = 1; // TODO: high water
+                av_log(s, AV_LOG_ERROR, "[pid 0x%x] overflow! flushing\n", ts_st2->pid);
+            }
+            if(ts_st2->buffer_duration_dts>90000*4){
+                should_stream = 1; // FIXME: temporary
+            }
+
             int64_t offs1 = (st && st->codecpar->codec_type==AVMEDIA_TYPE_VIDEO) ? 300*90000/2 : 0;
             int64_t offs2 = (st2->codecpar->codec_type==AVMEDIA_TYPE_VIDEO) ? 300*90000/2 : 0;
             offs1 = offs2 = 0;
@@ -1551,10 +1598,11 @@ static void drain_interleaving_buffer(const AVFormatContext *s, int flush){
                 ts_st = ts_st2;
             }
         }
+        if(!should_stream) return;
         //if(!ts_st1->stream_time) return;
         if(!ts_st->packets_first) break;
         if(!ts_st->packets_first->end_streamtime) {
-            calc_stream_times(st, flush); // calc end time
+            calc_stream_times(s, st, flush); // calc end time
             if(!ts_st->packets_first->end_streamtime) {
                 av_log(s, AV_LOG_ERROR, "[pid 0x%x] not ready yet\n", ts_st->pid);
                 break;
@@ -2077,7 +2125,14 @@ static void mpegts_deinit(AVFormatContext *s)
                 avformat_free_context(ts_st->amux);
                 ts_st->amux = NULL;
             }
-            //FIXME: free payloads
+            //FIXME: check this:
+            MpegTSPesPacket *pes_packet = ts_st->packets_first;
+            while(pes_packet){
+                MpegTSPesPacket *tmp = pes_packet;
+                pes_packet = pes_packet->next;
+                av_free(tmp->payload);
+                av_free(tmp);
+            }
         }
     }
 
