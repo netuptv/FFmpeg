@@ -1680,7 +1680,7 @@ static void mpegts_write_pes(const AVFormatContext *s, const AVStream *st,
     MpegTSWriteStream *ts_st = st->priv_data;
     if(ts_st->packets_last){
         int64_t dts_diff = pes_packet->dts - ts_st->packets_last->dts;
-        if(dts_diff < DTS_WRAP_THRESHOLD)
+        if(dts_diff < DTS_WRAP_THRESHOLD) // TODO: add discontinuity flag?
             ts_st->buffer_duration_dts += dts_diff;
 
         ts_st->packets_last->next = pes_packet;
