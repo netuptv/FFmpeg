@@ -144,6 +144,7 @@ typedef struct MpegTSWrite {
     int tsi_thread_exit;
 #endif
     int tsi_is_realtime;
+    int64_t tsi_dbg_mpegts_write_pes_enter_time;
 } MpegTSWrite;
 
 /* a PES packet header is generated every DEFAULT_PES_HEADER_FREQ packets */
@@ -1878,16 +1879,16 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     }
 
     //TODO: remove debug
-    static int64_t t0 = 0;
     {
         int64_t t = av_gettime_relative();
-        if (t0 == 0) t0 = t;
-        if (t - t0 > 600000) {
+        if (ts->tsi_dbg_mpegts_write_pes_enter_time == 0) ts->tsi_dbg_mpegts_write_pes_enter_time = t;
+        if (t - ts->tsi_dbg_mpegts_write_pes_enter_time > 600000) {
             char buf[4096];
             tsi_dbg_sprintf_buffers(buf, 4096, s, ((MpegTSWriteStream*)st->priv_data)->service);
-            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: last packet was %.3f sec ago (buffers %s)\n", (t - t0) / 1000000.0, buf);
+            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: last packet was %.3f sec ago (buffers %s)\n",
+                (t - ts->tsi_dbg_mpegts_write_pes_enter_time) / 1000000.0, buf);
         }
-        t0 = t;
+        ts->tsi_dbg_mpegts_write_pes_enter_time = t;
     }
 
 #if 1
@@ -1933,15 +1934,16 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 
     pthread_mutex_unlock(&ts->tsi_mutex);
 
-    { //TODO: remove debug
-        int64_t t = av_gettime_relative();
-        if (t - t0 > 100000 ) {
-            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: call duration %.3f sec\n", (t - t0) / 1000000.0);
-        }
-    }
-
     if (!ts->tsi_is_realtime) {
         tsi_drain_interleaving_buffer(s, AV_NOPTS_VALUE, 0);
+    }
+
+    { //TODO: remove debug
+        int64_t t = av_gettime_relative();
+        if (t - ts->tsi_dbg_mpegts_write_pes_enter_time > 100000 ) {
+            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: call duration %.3f sec\n",
+                (t - ts->tsi_dbg_mpegts_write_pes_enter_time) / 1000000.0);
+        }
     }
 
 
