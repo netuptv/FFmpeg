@@ -1542,13 +1542,41 @@ static const int64_t TSI_WINDOW = 90000/2;
 static const int64_t TSI_BUFFER_LOW  = 90000*2;
 static const int64_t TSI_BUFFER_MED  = 90000*4;
 static const int64_t TSI_BUFFER_HIGH = 90000*15;
+static const int64_t TSI_MAX_AUDIO_PACKET_DURATION = 120*90000/1000;// 120ms
 
 static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
 {
-    // calc first packet end time
     MpegTSWriteStream* ts_st = st->priv_data;
 
-    //TODO: join audio packets here
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { // join audio pes-packets
+         int cnt = 0;
+         int size = 0;
+         MpegTSPesPacket *pkt = ts_st->packets_first;
+         int64_t first_dts = pkt->dts;
+         while (pkt->next && first_dts + TSI_MAX_AUDIO_PACKET_DURATION >= pkt->next->dts) {
+              cnt += 1;
+              size += pkt->payload_size;
+              pkt = pkt->next;
+         }
+         if (cnt > 1) {
+             ts_st->packets_first->payload = av_realloc(ts_st->packets_first->payload, size);
+             MpegTSPesPacket *pkt = ts_st->packets_first->next;
+             for(int i=1; i < cnt; i++) {
+                 MpegTSPesPacket *tmp = pkt;
+                 memcpy(ts_st->packets_first->payload + ts_st->packets_first->payload_size, pkt->payload, pkt->payload_size);
+                 ts_st->packets_first->payload_size += pkt->payload_size;
+                 pkt = pkt->next;
+                 av_free(tmp->payload);
+                 av_free(tmp);
+             }
+             ts_st->packets_first->next = pkt;
+         }
+         //pkt = ts_st->packets_first;
+         //if (pkt->next)
+         //    av_log(s, AV_LOG_INFO, "[pid 0x%x] audio pkt %.3fsec/%dbytes %d joins \n", ts_st->pid, (pkt->next->dts-pkt->dts)/90000.0,
+         //           (int)pkt->payload_size, cnt);
+
+    }
     //TODO: a/v offsets?
     //int64_t offs1 = (st && st->codecpar->codec_type==AVMEDIA_TYPE_VIDEO) ? 90000/2 : 0;
 
@@ -1804,6 +1832,15 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
     if(duration!=AV_NOPTS_VALUE){
         ts->ts_stream_time += duration;
     }
+}
+
+static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in, int flush)
+{
+    //return ff_interleave_packet_per_dts(s, out, in, flush);
+    if (in) {
+        av_copy_packet(out, in);
+    }
+    return in != NULL;
 }
 
 static void* tsi_thread(void *opaque){
@@ -2227,6 +2264,7 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
         }
     }
 
+#if 0
     if (pkt->dts != AV_NOPTS_VALUE) {
         int i;
         for(i=0; i<s->nb_streams; i++) {
@@ -2273,6 +2311,10 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     memcpy(ts_st->payload + ts_st->payload_size, buf, size);
     ts_st->payload_size += size;
     ts_st->opus_queued_samples += opus_samples;
+#else
+    mpegts_write_pes(s, st, buf, size, pts, dts,
+                     pkt->flags & AV_PKT_FLAG_KEY, stream_id);
+#endif
 
     av_free(data);
 
@@ -2506,6 +2548,7 @@ AVOutputFormat ff_mpegts_muxer = {
     .init           = mpegts_init,
     .write_packet   = mpegts_write_packet,
     .write_trailer  = mpegts_write_end,
+    .interleave_packet = tsi_interleave_packet,
     .deinit         = mpegts_deinit,
     .check_bitstream = mpegts_check_bitstream,
     .flags          = AVFMT_ALLOW_FLUSH | AVFMT_VARIABLE_FPS,
