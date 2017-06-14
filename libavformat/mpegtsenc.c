@@ -1574,6 +1574,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
                  av_free(tmp);
              }
              ts_st->packets_first->next = pkt;
+             ts_st->buffer_packets -= cnt - 1;
          }
          //pkt = ts_st->packets_first;
          //if (pkt->next)
