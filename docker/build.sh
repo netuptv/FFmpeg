@@ -14,7 +14,7 @@ OUT_DIR=$(pwd)/out/${TARGET}
 BUILD_DIR=$(pwd)/build/${TARGET}
 CCACHE_DIR=$(pwd)/ccache/${TARGET}
 IMAGE_TAG=$(head -n 1 ${SCRIPT_DIR}/build.tag)
-IMAGE_NAME=build.netup:5000/iptv_2.0_build:${IMAGE_TAG}
+IMAGE_NAME=build.netup:5000/iptv_2.2_build:${IMAGE_TAG}
 
 mkdir -p ${OUT_DIR} ${CCACHE_DIR} ${BUILD_DIR}
 
