@@ -1581,7 +1581,7 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
 
 //TODO: AVOption ?
 static const int64_t TSI_DISCONTINUITY_THRESHOLD = 1000 * 90000LL / 1000;
-static const int64_t TSI_WINDOW = 600 * 90000LL / 1000;
+static const int64_t TSI_WINDOW = 700 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_LOW  = 500 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_TARGET = 4000 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_HIGH = 15000 * 90000LL / 1000;
@@ -1842,7 +1842,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
         new_stream_time = ts_st->stream_time + ts_st->service->time_offset;
 
-        if (duration == AV_NOPTS_VALUE){ // non-realtime
+        if (duration == AV_NOPTS_VALUE) { // non-realtime
             int64_t max_dts_buffered = 0;
             for (int i=0; i<ts->nb_services; i++)
                 max_dts_buffered = FFMAX(max_dts_buffered, ts->services[i]->max_dts_buffered);
@@ -1900,7 +1900,15 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
             tsi_remove_empty_packet(ts_st);
         }
     }
-    //TODO: in realtime mode - drop overflowed packets here && continue
+    if (duration != AV_NOPTS_VALUE) { // realtime
+        // drop overflowed services
+        for (int i=0; i<ts->nb_services; i++) {
+            if (ts->services[i]->max_dts_buffered > TSI_BUFFER_HIGH) {
+                //FIXME: drop overflowed packets here
+                //av_log(s, AV_LOG_ERROR, "[tsi] service#%d buffer overflow, dropping buffers\n",i);
+            }
+        }
+    }
 }
 
 static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in, int flush)
