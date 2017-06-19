@@ -1306,20 +1306,20 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
             int64_t expected; // TODO: rename
             int64_t bytes = avio_tell(s->pb);
             if(ts->rate_last_streamtime==0){ // FIXME: ?
-                ts->rate_last_streamtime = service_time;
+                ts->rate_last_streamtime = ts->ts_stream_time;
                 ts->rate_last_bytes = bytes;
             }
-            expected = ts->rate_last_bytes + ts->mux_rate*(service_time-ts->rate_last_streamtime)/(8*300*90000)
-                    - bytes;
+            expected = ts->mux_rate * (ts->ts_stream_time - ts->rate_last_streamtime) / (8 * 90000)
+                    - (bytes - ts->rate_last_bytes);
             if (expected < -188 * 10 ) { // TODO: threshold?
                 av_log(s, AV_LOG_WARNING, "[tsi] bitrate too high, resyncing (%d packets)\n",
                        (int) -expected / 188);
-                ts->rate_last_streamtime = service_time;
-                ts->rate_last_bytes = avio_tell(s->pb);
+                ts->rate_last_streamtime = ts->ts_stream_time;
+                ts->rate_last_bytes = bytes;
             }
-            /*if(expected>188*6){
-                av_log(s, AV_LOG_WARNING, "[tsi] bitrate too low %d\n",(int)expected/188);
-            }*/
+            if (expected > (ts->mux_rate / 8) / 20 ) {
+                av_log(s, AV_LOG_WARNING, "[tsi] [WTF] NULL packet burst (%d packets)\n",(int)expected/188);
+            }
             while (expected > 188) {
                 mpegts_insert_null_packet(s);
                 expected -= 188;
@@ -1820,6 +1820,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
     while (1) {
         AVStream *st = NULL;
         MpegTSWriteStream *ts_st = NULL;
+        int64_t new_stream_time;
 
         if (should_update_packets_info) {
             tsi_update_packets_info(s, flush);
@@ -1831,19 +1832,26 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
         ts_st = st->priv_data;
 
+        new_stream_time = ts_st->stream_time + ts_st->service->time_offset;
+
         if (duration == AV_NOPTS_VALUE){ // non-realtime
-            int64_t new_time = ts_st->stream_time + ts_st->service->time_offset;
-            //FIXME: check all services
-            if (ts_st->service->max_dts_buffered <= TSI_BUFFER_TARGET && !flush) break;
-            if (new_time < ts->ts_stream_time) { // TODO: this should not happen, remove check
-                av_log(s, AV_LOG_ERROR, "[tsi] WTF: (new_time < ts->ts_stream_time) (%ld < %ld)\n", new_time, ts->ts_stream_time);
-            }
-            ts->ts_stream_time = new_time;
+            int64_t max_dts_buffered = 0;
+            for (int i=0; i<ts->nb_services; i++)
+                max_dts_buffered = FFMAX(max_dts_buffered, ts->services[i]->max_dts_buffered);
+            if (max_dts_buffered < TSI_BUFFER_TARGET && !flush)
+                break;
         } else {
-            //FIXME: implement non-realtime
-            //FIXME: change stream time here
-            if (ts_st->service->time_offset + ts_st->stream_time > ts->ts_stream_time + duration) break;
+            if (new_stream_time > ts->ts_stream_time + duration) {
+                ts->ts_stream_time += duration;
+                break;
+            }
+            duration -= new_stream_time - ts->ts_stream_time;
         }
+
+        if (new_stream_time < ts->ts_stream_time) { // TODO: this should not happen, remove check
+            av_log(s, AV_LOG_ERROR, "[tsi] [WTF] new_stream_time < ts->ts_stream_time (%ld < %ld)\n", new_stream_time, ts->ts_stream_time);
+        }
+        ts->ts_stream_time = new_stream_time;
 
 
         if (ts_st->packets_first->end_streamtime == AV_NOPTS_VALUE) {
@@ -1867,7 +1875,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                                     pes_packet->key,
                                     pes_packet->stream_id,
                                     pes_packet->consumed == 0,
-                                    stream_time*300 // TODO: sub delta for ajustment?
+                                    stream_time*300
                                     );
         { //TODO: remove debug
             int64_t t = av_gettime_relative();
@@ -1884,12 +1892,8 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
             tsi_remove_empty_packet(ts_st);
         }
     }
-    // TODO: in realtime mode - drop overflowed packets here && continue
+    //TODO: in realtime mode - drop overflowed packets here && continue
     //TODO: somewhere else:    svc->time_offset+DTS_WRAP_THRESHOLD < svc->min_time){
-    //FIXME: change stream time here
-    if (duration != AV_NOPTS_VALUE) {
-        ts->ts_stream_time += duration;
-    }
 }
 
 static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in, int flush)
