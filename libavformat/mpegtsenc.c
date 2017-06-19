@@ -1758,9 +1758,17 @@ static void tsi_update_packets_info(AVFormatContext *s, int flush)
             service->is_buffered = 1;
             service->time_offset = ts->ts_stream_time - service->min_time;
         }
-        if (service->is_buffered && ts->ts_stream_time > service->min_time + service->time_offset) {
-            av_log(s, AV_LOG_ERROR, "[tsi] service#%d incorrect stream interleaving. Time jumped back\n", i);
-            service->time_offset = ts->ts_stream_time - service->min_time;
+        if (service->is_buffered || flush ) { //TODO: check this only on new packet||flush ?
+            if (ts->ts_stream_time > service->min_time + service->time_offset) {
+                av_log(s, AV_LOG_ERROR, "[tsi] service#%d incorrect stream interleaving. Time jumped back\n", i);
+                service->time_offset = ts->ts_stream_time - service->min_time;
+            }
+            if (ts->ts_stream_time + TSI_WINDOW < service->min_time + service->time_offset) { // TODO: TSI_WINDOW vs new const?
+                av_log(s, AV_LOG_WARNING, "[tsi] service#%d detected large gap in playback, resyncing (gap=%.3fsec)\n",
+                       i,
+                       (service->min_time + service->time_offset - ts->ts_stream_time) / 90000.0);
+                service->time_offset = ts->ts_stream_time - service->min_time;
+            }
         }
     }
 }
@@ -1893,7 +1901,6 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
     }
     //TODO: in realtime mode - drop overflowed packets here && continue
-    //TODO: somewhere else:    svc->time_offset+DTS_WRAP_THRESHOLD < svc->min_time){
 }
 
 static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in, int flush)
