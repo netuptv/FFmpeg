@@ -830,32 +830,6 @@ static int mpegts_init(AVFormatContext *s)
     int *pids;
     int ret;
 
-    // FIXME: move? error handling
-    {
-        ts->last_pat = AV_NOPTS_VALUE;
-        ts->last_sdt = AV_NOPTS_VALUE;
-        ts->rate_last_streamtime = AV_NOPTS_VALUE;
-        ts->tsi_thread_exit = 0;
-        ret = pthread_mutex_init(&ts->tsi_mutex, NULL);
-        if (ret != 0) {
-            //av_log(h, AV_LOG_ERROR, "pthread_mutex_init failed : %s\n", strerror(ret));
-            goto fail;
-        }
-        ret = pthread_cond_init(&ts->tsi_cond, NULL);
-        if (ret != 0) {
-            //av_log(h, AV_LOG_ERROR, "pthread_cond_init failed : %s\n", strerror(ret));
-            goto fail;
-        }
-        if (ts->tsi_is_realtime) {
-            ret = pthread_create(&ts->tsi_thread, NULL, &tsi_thread, s);
-            if (ret != 0) {
-                //av_log(h, AV_LOG_ERROR, "pthread_create failed : %s\n", strerror(ret));
-                goto fail;
-            }
-        }
-    }
-
-
     if (s->max_delay < 0) /* Not set by the caller */
         s->max_delay = 0;
 
@@ -1102,6 +1076,31 @@ static int mpegts_init(AVFormatContext *s)
             ts->m2ts_mode = 1;
         } else {
             ts->m2ts_mode = 0;
+        }
+    }
+
+    // FIXME: move? error handling
+    {
+        ts->last_pat = AV_NOPTS_VALUE;
+        ts->last_sdt = AV_NOPTS_VALUE;
+        ts->rate_last_streamtime = AV_NOPTS_VALUE;
+        ts->tsi_thread_exit = 0;
+        ret = pthread_mutex_init(&ts->tsi_mutex, NULL);
+        if (ret != 0) {
+            //av_log(h, AV_LOG_ERROR, "pthread_mutex_init failed : %s\n", strerror(ret));
+            goto fail;
+        }
+        ret = pthread_cond_init(&ts->tsi_cond, NULL);
+        if (ret != 0) {
+            //av_log(h, AV_LOG_ERROR, "pthread_cond_init failed : %s\n", strerror(ret));
+            goto fail;
+        }
+        if (ts->tsi_is_realtime) {
+            ret = pthread_create(&ts->tsi_thread, NULL, &tsi_thread, s);
+            if (ret != 0) {
+                //av_log(h, AV_LOG_ERROR, "pthread_create failed : %s\n", strerror(ret));
+                goto fail;
+            }
         }
     }
 
