@@ -1567,36 +1567,6 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
     MpegTSWrite* ts = s->priv_data;
     MpegTSWriteStream* ts_st = st->priv_data;
 
-    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { // join audio pes-packets
-        //TOTO: join packets when adding?
-        int cnt = 0;
-        int size = 0;
-        MpegTSPesPacket *pkt = ts_st->packets_first;
-        int64_t first_dts = pkt->dts;
-        while (pkt->next && first_dts + TSI_MAX_AUDIO_PACKET_DURATION >= pkt->next->dts) {
-            cnt += 1;
-            size += pkt->payload_size;
-            pkt = pkt->next;
-        }
-        if (cnt > 1) {
-            MpegTSPesPacket *pkt = ts_st->packets_first->next;
-            ts_st->packets_first->payload = av_realloc(ts_st->packets_first->payload, size);
-            for(int i=1; i < cnt; i++) {
-                MpegTSPesPacket *tmp = pkt;
-                memcpy(ts_st->packets_first->payload + ts_st->packets_first->payload_size, pkt->payload, pkt->payload_size);
-                ts_st->packets_first->payload_size += pkt->payload_size;
-                pkt = pkt->next;
-                av_free(tmp->payload);
-                av_free(tmp);
-            }
-            ts_st->packets_first->next = pkt;
-            ts_st->buffer_packets -= cnt - 1;
-        }
-        //pkt = ts_st->packets_first;
-        //if (pkt->next)
-        //    av_log(s, AV_LOG_INFO, "[pid 0x%x] audio pkt %.3fsec/%dbytes %d joins \n", ts_st->pid, (pkt->next->dts-pkt->dts)/90000.0,
-        //           (int)pkt->payload_size, cnt);
-    }
     //ts_st->packets_first->end_streamtime = ts_st->packets_first->dts;
     //return;
 #if 0
@@ -1681,7 +1651,6 @@ static void tsi_dbg_sprintf_buffers(char* buf, int size, AVFormatContext *s, Mpe
     }
 }
 
-// FIXME: rename to schedule streams?
 static void tsi_schedule_services(AVFormatContext *s, int flush)
 {
     MpegTSWrite *ts = s->priv_data;
@@ -1793,7 +1762,8 @@ static void tsi_remove_empty_packet(MpegTSWriteStream *ts_st)
     av_free(pes_packet);
 }
 
-static void tsi_drop_overflowed_buffers(AVFormatContext *s) {
+static void tsi_drop_overflowed_buffers(AVFormatContext *s)
+{
     //FIXME: check this
     for (int i=0; i < s->nb_streams; i++) {
         AVStream *st = s->streams[i];
@@ -1977,6 +1947,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 {
     // TODO: NOPTS, buffer overflow, no-sub-stream, MPTS?
     //TODO: flush called on stream close
+    //TODO: pass buffer ref to mpegts_write_pes
 
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
@@ -2001,6 +1972,28 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     }
 
 #if 1
+    pthread_mutex_lock(&ts->tsi_mutex);
+
+    if (ts_st->packets_last && dts < ts_st->packets_last->dts) {
+        av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts<prev_dts (%ld<%ld) \n", ts_st->pid,
+               pes_packet->dts, ts_st->packets_last->dts);
+        pthread_mutex_unlock(&ts->tsi_mutex);
+        return;
+    }
+
+    // join audio pes-packets
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
+            && ts_st->packets_first != ts_st->packets_last
+            && ts_st->packets_last->dts + TSI_MAX_AUDIO_PACKET_DURATION >= dts) {
+        MpegTSPesPacket *pkt = ts_st->packets_last;
+        pkt->payload = av_realloc(pkt->payload, pkt->payload_size + payload_size);
+        memcpy(pkt->payload + pkt->payload_size, payload, payload_size);
+        pkt->payload_size += payload_size;
+        ts_st->buffer_bytes += payload_size;
+        pthread_mutex_unlock(&ts->tsi_mutex);
+        return;
+    }
+
     pes_packet = av_mallocz(sizeof(MpegTSPesPacket));
     pes_packet->payload = av_malloc(payload_size);
     memcpy(pes_packet->payload, payload, payload_size);
@@ -2009,20 +2002,12 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     pes_packet->dts = dts;
     pes_packet->key = key;
     pes_packet->stream_id = stream_id;
-
     pes_packet->end_streamtime = AV_NOPTS_VALUE;
-
-    pthread_mutex_lock(&ts->tsi_mutex);
 
     ts_st->buffer_packets += 1;
     ts_st->buffer_bytes += pes_packet->payload_size;
 
-    if (ts_st->packets_last && pes_packet->dts < ts_st->packets_last->dts) {
-        av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts<prev_dts (%ld<%ld) \n", ts_st->pid,
-               pes_packet->dts, ts_st->packets_last->dts);
-        av_free(pes_packet->payload);
-        av_free(pes_packet);
-    } else if (ts_st->packets_last) {
+    if (ts_st->packets_last) {
         int64_t dts_diff = pes_packet->dts - ts_st->packets_last->dts;
         if (dts_diff < TSI_DISCONTINUITY_THRESHOLD) {// TODO: add discontinuity flag?
             ts_st->buffer_duration_dts += dts_diff;
@@ -2233,6 +2218,7 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
             data[5] = 0xf0; // any slice type (0xe) + rbsp stop one bit
             buf     = data;
             size    = pkt->size + 6 + extradd;
+            av_log(s, AV_LOG_ERROR, "AUD NAL!!!\n");
         }
     } else if (st->codecpar->codec_id == AV_CODEC_ID_AAC) {
         if (pkt->size < 2) {
@@ -2374,7 +2360,14 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
         }
     }
 
-#if 0
+#if 1
+    if (1) { // if tsi
+        mpegts_write_pes(s, st, buf, size, pts, dts,
+                         pkt->flags & AV_PKT_FLAG_KEY, stream_id);
+        av_free(data);
+        return 0;
+    }
+#else
     if (pkt->dts != AV_NOPTS_VALUE) {
         int i;
         for(i=0; i<s->nb_streams; i++) {
@@ -2421,12 +2414,9 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     memcpy(ts_st->payload + ts_st->payload_size, buf, size);
     ts_st->payload_size += size;
     ts_st->opus_queued_samples += opus_samples;
-#else
-    mpegts_write_pes(s, st, buf, size, pts, dts,
-                     pkt->flags & AV_PKT_FLAG_KEY, stream_id);
-#endif
 
     av_free(data);
+#endif
 
     return 0;
 }
