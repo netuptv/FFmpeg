@@ -1584,20 +1584,31 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
     //ts_st->packet_end_time = ts_st->packets[ts_st->packets_head % (sizeof(ts_st->packets)/sizeof(ts_st->packets[0]))].dts;
     //return;
 #if 0
-    MpegTSPesPacket *end = ts_st->packets_first;//->next;
-    int64_t bytes=0;
-    //int64_t time=0;
-    int64_t min_time = ts_st->stream_time + 100L*90000;
-    //int64_t max_time = ts_st->stream_time + 100L*90000;
-    while(end && end->dts-ts_st->stream_time<90000L*1){ // FIXME
-        bytes += end->payload_size - end->consumed;
-        int64_t time = ts_st->stream_time +
-                //(300L*end->dts-ts_st->packets_first->start_streamtime) * (ts_st->packets_first->payload_size-ts_st->packets_first->consumed) / bytes;
-                (300L*end->dts-ts_st->stream_time) * (ts_st->packets_first->payload_size-ts_st->packets_first->consumed) / bytes;
-        min_time = FFMIN(min_time, time);
-        end = end->next;
+    int64_t res;
+    int64_t service_time = ts_st->service_time;
+    MpegTSPesPacket *end = tsi_buffer_head(ts_st);
+    uint64_t first_bytes = end->payload_size;
+    uint64_t bytes=0;
+
+    if (1) {
+        struct fraction_t { int64_t num; int64_t den; } min_val={0,0}, cur_val;
+        for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
+            bytes += end->payload_size;
+            cur_val = (struct fraction_t){(end->dts-service_time)/* *first_bytes*/, bytes};
+            if (min_val.den == 0 || cur_val.num*min_val.den < min_val.num*cur_val.den){
+                min_val = cur_val;
+            }
+        }
+        res = first_bytes*min_val.num/min_val.den;
+    } else {
+        int64_t min_time = INT64_MAX;
+        for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
+            bytes += end->payload_size;
+            min_time = FFMIN(min_time, ((end->dts-service_time)) * first_bytes / bytes);
+        }
+        res = min_time;
     }
-    ts_st->packets_first->end_streamtime = min_time;
+    ts_st->packet_end_time = service_time + res;
 #else
     {
         MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
