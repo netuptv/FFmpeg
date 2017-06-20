@@ -270,11 +270,6 @@ typedef struct MpegTSPesPacket {
     int stream_id;
     //
     struct MpegTSPesPacket* next;
-
-    //FIXME: move to MpegTSWriteStream
-    int64_t start_streamtime;
-    int64_t end_streamtime;
-    int consumed;
 }MpegTSPesPacket;
 
 typedef struct MpegTSWriteStream {
@@ -302,6 +297,10 @@ typedef struct MpegTSWriteStream {
     int64_t buffer_duration_dts;
     int64_t buffer_bytes;
     int64_t buffer_packets;
+
+    int64_t packet_start_time;
+    int64_t packet_end_time;
+    int packet_consumed_bytes;
 } MpegTSWriteStream;
 
 static void mpegts_write_pat(AVFormatContext *s)
@@ -940,6 +939,8 @@ static int mpegts_init(AVFormatContext *s)
         st->priv_data = ts_st;
 
         ts_st->service_time = AV_NOPTS_VALUE; // FIXME: check this
+        ts_st->packet_start_time = AV_NOPTS_VALUE; //FIXME: needed?
+        ts_st->packet_end_time = AV_NOPTS_VALUE; //FIXME: needed?
 
         ts_st->user_tb = st->time_base;
         avpriv_set_pts_info(st, 33, 1, 90000);
@@ -1589,16 +1590,17 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         MpegTSPesPacket *end = ts_st->packets_first;
         int64_t bytes = 0;
         int64_t duration = 0;
-        int64_t min_time = ts_st->packets_first->start_streamtime;
+        int64_t min_time = ts_st->packet_start_time;
         int64_t max_time = ts_st->packets_first->dts;
-        int64_t prev_dts = ts_st->packets_first->start_streamtime;
+        int64_t prev_dts = ts_st->packet_start_time;
         while (end && duration < TSI_BUFFER_TARGET) {
             bytes += end->payload_size;
+            //FIXME: different discontinuities?
             if (end->dts-prev_dts < TSI_DISCONTINUITY_THRESHOLD) { // FIXME: what else? += prev delta?
                 duration += end->dts-prev_dts;
             }
             // FIXME: rewrite
-            int64_t time = ts_st->packets_first->start_streamtime + duration * ts_st->packets_first->payload_size / bytes;
+            int64_t time = ts_st->packet_start_time + duration * ts_st->packets_first->payload_size / bytes;
             if (time < min_time) {
                 max_time = FFMIN(max_time, min_time);
                 //av_log(s, AV_LOG_ERROR, "[pid 0x%x] INTERESTING1\n", ts_st->pid);
@@ -1606,7 +1608,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
             } else {
                 max_time = FFMIN(max_time, time);
                 if (duration > TSI_WINDOW) {
-                    int64_t time = ts_st->packets_first->start_streamtime +
+                    int64_t time = ts_st->packet_start_time +
                             (duration - TSI_WINDOW) * ts_st->packets_first->payload_size / bytes;
                     min_time = FFMAX(min_time, time);
                 }
@@ -1614,7 +1616,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
             prev_dts = end->dts;
             end = end->next;
         }
-        ts_st->packets_first->end_streamtime = max_time;
+        ts_st->packet_end_time = max_time;
         if (max_time + TSI_WINDOW == ts_st->packets_first->dts && ts->mux_rate > 1) // FIXME: log it when PCR ajustment failed?
             av_log(s, AV_LOG_WARNING, "[tsi] [pid 0x%x] Consider increasing TSI_WINDOW: offset=%.3fsec\n", ts_st->pid,
                    (ts_st->packets_first->dts - max_time) / 90000.0 );
@@ -1680,7 +1682,7 @@ static void tsi_schedule_services(AVFormatContext *s, int flush)
         //FIXME: set streamtime if NOPTS && first_packet ?
         if (ts_st2->service_time == AV_NOPTS_VALUE) {
             if(!ts_st2->packets_first) continue;
-            ts_st2->service_time = ts_st2->packets_first->start_streamtime; //FIXME:?
+            ts_st2->service_time = ts_st2->packet_start_time; //FIXME:!!!
         }
         ts_st2->service->max_dts_buffered = FFMAX(ts_st2->service->max_dts_buffered, ts_st2->buffer_duration_dts);
         ts_st2->service->min_time = FFMIN(ts_st2->service->min_time, ts_st2->service_time);
@@ -1746,17 +1748,19 @@ static void tsi_remove_empty_packet(MpegTSWriteStream *ts_st)
         int64_t dts_diff = pes_packet->next->dts - pes_packet->dts;
         if (dts_diff < TSI_DISCONTINUITY_THRESHOLD) {
             ts_st->buffer_duration_dts -= dts_diff;
-            pes_packet->next->start_streamtime = pes_packet->end_streamtime;
+            ts_st->packet_start_time = ts_st->packet_end_time;
+            ts_st->packet_end_time = AV_NOPTS_VALUE;
             //FIXME: update stream_time?
         } else {
             //FIXME: wtf???
-            pes_packet->next->start_streamtime = pes_packet->next->dts - (pes_packet->dts - pes_packet->end_streamtime); // FIXME: sub prev dts delta?
-            ts_st->service_time = pes_packet->next->start_streamtime;
+            ts_st->packet_start_time = pes_packet->next->dts - (pes_packet->dts - ts_st->packet_end_time); // FIXME: sub prev dts delta?
+            ts_st->service_time = ts_st->packet_start_time;
         }
     } else {
         ts_st->service_time = AV_NOPTS_VALUE;
         ts_st->packets_last = NULL;
     }
+    ts_st->packet_consumed_bytes = 0;
 
     av_free(pes_packet->payload);
     av_free(pes_packet);
@@ -1829,7 +1833,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
         ts->ts_stream_time = new_stream_time;
 
-        if (ts_st->packets_first->end_streamtime == AV_NOPTS_VALUE) {
+        if (ts_st->packet_end_time == AV_NOPTS_VALUE) { // TODO (consumed==0) packet start?
             tsi_schedule_first_packet(s, st);
         }
 
@@ -1840,7 +1844,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
         // PAT/PMT packets
         int force_pat = 0;
-        if (pes_packet->consumed == 0 && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (ts_st->packet_consumed_bytes == 0 && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             force_pat = pes_packet->key;// FIXME: && !ts_st->prev_payload_key;
             force_pat = force_pat || ts->flags & MPEGTS_FLAG_PAT_PMT_AT_FRAMES;
         }
@@ -1879,13 +1883,13 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
         int64_t t0 = av_gettime_relative();
         int len = mpegts_write_pes1(s, st,
-                                    pes_packet->payload + pes_packet->consumed,
-                                    pes_packet->payload_size - pes_packet->consumed,
+                                    pes_packet->payload + ts_st->packet_consumed_bytes,
+                                    pes_packet->payload_size - ts_st->packet_consumed_bytes,
                                     pes_packet->pts,
                                     pes_packet->dts,
                                     pes_packet->key,
                                     pes_packet->stream_id,
-                                    pes_packet->consumed == 0,
+                                    ts_st->packet_consumed_bytes == 0,
                                     ts_st->service_time * 300
                                     );
         { //TODO: remove debug
@@ -1895,10 +1899,10 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                     (t - t0) / 1000000.0);
             }
         }
-        pes_packet->consumed += len;
-        ts_st->service_time = pes_packet->start_streamtime + (pes_packet->end_streamtime - pes_packet->start_streamtime) * pes_packet->consumed / pes_packet->payload_size;
+        ts_st->packet_consumed_bytes += len;
+        ts_st->service_time = ts_st->packet_start_time + (ts_st->packet_end_time - ts_st->packet_start_time) * ts_st->packet_consumed_bytes / pes_packet->payload_size;
 
-        if (pes_packet->consumed == pes_packet->payload_size) {
+        if (ts_st->packet_consumed_bytes == pes_packet->payload_size) {
             tsi_remove_empty_packet(ts_st);
             tsi_schedule_services(s, flush);
         }
@@ -2002,7 +2006,6 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     pes_packet->dts = dts;
     pes_packet->key = key;
     pes_packet->stream_id = stream_id;
-    pes_packet->end_streamtime = AV_NOPTS_VALUE;
 
     ts_st->buffer_packets += 1;
     ts_st->buffer_bytes += pes_packet->payload_size;
@@ -2024,8 +2027,8 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         ts_st->packets_last = pes_packet;
         // We don't know how to properly redistribute time in a first frame.
         // Assume worst case - it's a huge packet occupying full TSI_WINDOW.
-        pes_packet->start_streamtime = pes_packet->dts - TSI_WINDOW;
-        ts_st->service_time = pes_packet->start_streamtime; // FIXME: move to update_info
+        ts_st->packet_start_time = pes_packet->dts - TSI_WINDOW; // FIXME: move to update_info
+        ts_st->service_time = ts_st->packet_start_time;
     }
 
     pthread_mutex_unlock(&ts->tsi_mutex);
