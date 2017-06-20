@@ -270,6 +270,8 @@ typedef struct MpegTSPesPacket {
     int stream_id;
     //
     struct MpegTSPesPacket* next;
+
+    //FIXME: move to MpegTSWriteStream
     int64_t start_streamtime;
     int64_t end_streamtime;
     int consumed;
@@ -1116,23 +1118,19 @@ static void retransmit_si_info(AVFormatContext *s, int force_pat, int64_t dts)
     MpegTSWrite *ts = s->priv_data;
     int i;
 
-    /*if (++ts->sdt_packet_count == ts->sdt_packet_period ||
+    if (++ts->sdt_packet_count == ts->sdt_packet_period ||
         (dts != AV_NOPTS_VALUE && ts->last_sdt_ts == AV_NOPTS_VALUE) ||
         (dts != AV_NOPTS_VALUE && dts - ts->last_sdt_ts >= ts->sdt_period*90000.0)
-    ) {*/
-    if(ts->last_sdt + 1*90000 < dts){
-        ts->last_sdt = dts;
+    ) {
         ts->sdt_packet_count = 0;
         if (dts != AV_NOPTS_VALUE)
             ts->last_sdt_ts = FFMAX(dts, ts->last_sdt_ts);
         mpegts_write_sdt(s);
     }
-    /*if (++ts->pat_packet_count == ts->pat_packet_period ||
+    if (++ts->pat_packet_count == ts->pat_packet_period ||
         (dts != AV_NOPTS_VALUE && ts->last_pat_ts == AV_NOPTS_VALUE) ||
-        (dts != AV_NOPTS_VALUE && dts - ts->last_pat_ts >= ts->pat_period*90000.0) ||*/
-    if(ts->last_pat + 8000 < dts ||
+        (dts != AV_NOPTS_VALUE && dts - ts->last_pat_ts >= ts->pat_period*90000.0) ||
         force_pat) {
-        ts->last_pat = dts;
         ts->pat_packet_count = 0;
         if (dts != AV_NOPTS_VALUE)
             ts->last_pat_ts = FFMAX(dts, ts->last_pat_ts);
@@ -1276,9 +1274,7 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
         force_pat = 0;
 
     if (1) {
-        //FIXME: retransmit_si_info(s, force_pat, dts);
         //retransmit_si_info(s, force_pat, dts);
-        retransmit_si_info(s, force_pat, service_time/300);
 
         write_pcr = 0;
 #if 0
@@ -1300,30 +1296,6 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
                 mpegts_insert_null_packet(s);
             /* recalculate write_pcr and possibly retransmit si_info */
             return 0;
-        }
-#else
-        if (ts->mux_rate > 1) {// && ts_st->pid == ts_st->service->pcr_pid){ // TODO: only pcr pid?
-            int64_t expected; // TODO: rename
-            int64_t bytes = avio_tell(s->pb);
-            if(ts->rate_last_streamtime==0){ // FIXME: ?
-                ts->rate_last_streamtime = ts->ts_stream_time;
-                ts->rate_last_bytes = bytes;
-            }
-            expected = ts->mux_rate * (ts->ts_stream_time - ts->rate_last_streamtime) / (8 * 90000)
-                    - (bytes - ts->rate_last_bytes);
-            if (expected < -188 * 20 ) { // TODO: threshold?
-                av_log(s, AV_LOG_WARNING, "[tsi] bitrate too high, resyncing (%d packets)\n",
-                       (int) -expected / 188);
-                ts->rate_last_streamtime = ts->ts_stream_time;
-                ts->rate_last_bytes = bytes;
-            }
-            if (expected > (ts->mux_rate / 8) / 20 ) {
-                av_log(s, AV_LOG_WARNING, "[tsi] [WTF] NULL packet burst (%d packets)\n",(int)expected/188);
-            }
-            while (expected > 188) {
-                mpegts_insert_null_packet(s);
-                expected -= 188;
-            }
         }
 #endif
 
@@ -1624,7 +1596,8 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         //    av_log(s, AV_LOG_INFO, "[pid 0x%x] audio pkt %.3fsec/%dbytes %d joins \n", ts_st->pid, (pkt->next->dts-pkt->dts)/90000.0,
         //           (int)pkt->payload_size, cnt);
     }
-
+    //ts_st->packets_first->end_streamtime = ts_st->packets_first->dts;
+    //return;
 #if 0
     MpegTSPesPacket *end = ts_st->packets_first;//->next;
     int64_t bytes=0;
@@ -1838,9 +1811,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
         st = tsi_get_earliest_stream(s, flush);
         if (!st) break;
-
         ts_st = st->priv_data;
-
         new_stream_time = ts_st->stream_time + ts_st->service->time_offset;
 
         if (duration == AV_NOPTS_VALUE) { // non-realtime
@@ -1867,10 +1838,52 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
             tsi_schedule_first_packet(s, st);
         }
 
-        //FIXME: send SDT/PAT/PMT/NULL here
+        MpegTSPesPacket* pes_packet = ts_st->packets_first;
+
+        // SDT packets
+        if (ts->last_sdt + 1*90000 < new_stream_time) {
+            ts->last_sdt = new_stream_time;
+            mpegts_write_sdt(s);
+        }
+        // PAT/PMT packets
+        int force_pat = 0;
+        if (pes_packet->consumed == 0 && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            force_pat = pes_packet->key;// FIXME: && !ts_st->prev_payload_key;
+            force_pat = force_pat || ts->flags & MPEGTS_FLAG_PAT_PMT_AT_FRAMES;
+        }
+        if(ts->last_pat + 8000 < new_stream_time || force_pat) {
+            ts->last_pat = new_stream_time;
+            mpegts_write_pat(s);
+            for (int i = 0; i < ts->nb_services; i++) // FIXME: send only one PMT at a time?
+                mpegts_write_pmt(s, ts->services[i]);
+        }
+        // NULL packets
+        if (ts->mux_rate > 1) {// && ts_st->pid == ts_st->service->pcr_pid){ // TODO: only pcr pid?
+            int64_t expected; // TODO: rename
+            int64_t bytes = avio_tell(s->pb);
+            if(ts->rate_last_streamtime==0){ // FIXME: ?
+                ts->rate_last_streamtime = ts->ts_stream_time;
+                ts->rate_last_bytes = bytes;
+            }
+            expected = ts->mux_rate * (ts->ts_stream_time - ts->rate_last_streamtime) / (8 * 90000)
+                    - (bytes - ts->rate_last_bytes);
+            if (expected < -188 * 20 ) { // TODO: threshold?
+                av_log(s, AV_LOG_WARNING, "[tsi] bitrate too high, resyncing (%d packets)\n",
+                       (int) -expected / 188);
+                ts->rate_last_streamtime = ts->ts_stream_time;
+                ts->rate_last_bytes = bytes;
+            }
+            if (expected > (ts->mux_rate / 8) / 20 ) {
+                av_log(s, AV_LOG_WARNING, "[tsi] [WTF] NULL packet burst (%d packets)\n",(int)expected/188);
+            }
+            while (expected > 188) {
+                mpegts_insert_null_packet(s);
+                expected -= 188;
+            }
+        }
+
         //FIXME: perform PCR ajustment here +-delta
 
-        MpegTSPesPacket* pes_packet = ts_st->packets_first;
         int64_t stream_time = pes_packet->start_streamtime + (pes_packet->end_streamtime - pes_packet->start_streamtime) * pes_packet->consumed / pes_packet->payload_size;
 
         //return av_rescale(avio_tell(pb) + 11, 8 * PCR_TIME_BASE, ts->mux_rate) +
