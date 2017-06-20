@@ -1702,7 +1702,7 @@ static void tsi_schedule_services(AVFormatContext *s, int flush)
             service->is_buffered = 1;
             service->time_offset = ts->ts_stream_time - service->min_time;
         }
-        if (service->is_buffered || flush ) { //TODO: check this only on new packet||flush ?
+        if (service->min_time != INT64_MAX && (service->is_buffered || flush) ) { //TODO: check this only on new packet||flush ?
             if (ts->ts_stream_time > service->min_time + service->time_offset) {
                 av_log(s, AV_LOG_ERROR, "[tsi] service#%d incorrect stream interleaving. Time jumped back\n", i);
                 service->time_offset = ts->ts_stream_time - service->min_time;
