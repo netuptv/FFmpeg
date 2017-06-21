@@ -77,6 +77,7 @@ typedef struct MpegTSService {
     int64_t max_dts_buffered; // TODO: local var?
     int64_t min_time; // TODO: local var?
     int64_t time_offset; //streamtime_offset?
+    int64_t tsi_dbg_mpegts_write_pes_enter_time;
 } MpegTSService;
 
 // service_type values as defined in ETSI 300 468
@@ -147,7 +148,6 @@ typedef struct MpegTSWrite {
     int tsi_thread_exit;
     int tsi_is_realtime;
 #endif
-    int64_t tsi_dbg_mpegts_write_pes_enter_time;
     int64_t tsi_dbg_buffer_report_time;
 } MpegTSWrite;
 
@@ -1959,14 +1959,15 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     //TODO: remove debug
     {
         int64_t t = av_gettime_relative();
-        if (ts->tsi_dbg_mpegts_write_pes_enter_time == 0) ts->tsi_dbg_mpegts_write_pes_enter_time = t;
-        if (t - ts->tsi_dbg_mpegts_write_pes_enter_time > 600000) {
+        int64_t *prev = &ts_st->service->tsi_dbg_mpegts_write_pes_enter_time;
+        if (*prev == 0) *prev = t;
+        if (t - *prev > 600000) {
             char buf[4096];
             tsi_dbg_snprintf_buffers(buf, sizeof(buf), s, ((MpegTSWriteStream*)st->priv_data)->service, NULL);
-            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: last packet was %.3f sec ago (buffers %s)\n",
-                (t - ts->tsi_dbg_mpegts_write_pes_enter_time) / 1000000.0, buf);
+            av_log(s, AV_LOG_WARNING, "[tsi] service#%x mpegts_write_pes: last packet was %.3f sec ago (buffers %s)\n",
+                   ts_st->service->sid, (t - *prev) / 1000000.0, buf);
         }
-        ts->tsi_dbg_mpegts_write_pes_enter_time = t;
+        *prev = t;
     }
 
 #if 1
@@ -2051,9 +2052,10 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 
     { //TODO: remove debug
         int64_t t = av_gettime_relative();
-        if (t - ts->tsi_dbg_mpegts_write_pes_enter_time > 100000 ) {
-            av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes: call duration %.3f sec\n",
-                (t - ts->tsi_dbg_mpegts_write_pes_enter_time) / 1000000.0);
+        int64_t *prev = &ts_st->service->tsi_dbg_mpegts_write_pes_enter_time;
+        if (t - *prev > 100000 ) {
+            av_log(s, AV_LOG_WARNING, "[tsi] service#%x mpegts_write_pes: call duration %.3f sec\n",
+                ts_st->service->sid, (t - *prev) / 1000000.0);
         }
     }
 
