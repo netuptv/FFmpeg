@@ -1246,6 +1246,8 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
         return pkt + 4;
 }
 
+int64_t tsi_adjust_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int64_t pcr, int64_t bytes);
+
 /* Add a PES header to the front of the payload, and segment into an integer
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
@@ -1323,29 +1325,6 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
         if (ts_st->pid == ts_st->service->pcr_pid && ts_st->service->last_pcr + 3000*300 < service_time)
             write_pcr = 1;
         if (write_pcr) {
-            int64_t adjustment = 0;
-            int64_t bytes = avio_tell(s->pb);
-            service_time -=  TSI_MAX_PCR_ADJUSTMENT*300;
-            if (ts->mux_rate > 1 && ts_st->service->last_pcr != AV_NOPTS_VALUE){
-                int64_t bytes_diff = bytes - ts_st->service->last_pcr_bytes;
-                int64_t pcr_diff = service_time - ts_st->service->last_pcr;
-                int64_t tmp = ts_st->service->last_pcr_remainder + bytes_diff * 8 * PCR_TIME_BASE;
-                int64_t exp = tmp / ts->mux_rate;
-                ts_st->service->last_pcr_remainder = tmp % ts->mux_rate;
-                adjustment = exp - pcr_diff;
-                if (llabs(adjustment)>=TSI_MAX_PCR_ADJUSTMENT * 300) {// 5*PCR_TIME_BASE/1000) {
-                    // TODO: disable warning after buffering ?
-                    av_log(s, AV_LOG_WARNING, "[tsi] pcr ajustment exceeds limit, resetting to zero (was %9.6fsec, prev %.6fsec, pcr-diff %.6fsec, bytes %d) \n",
-                           adjustment / (300.0 * 90000.0),
-                           ts_st->service->tsi_dbg_prev_pcr_adjustment / (300.0 * 90000.0),
-                           (service_time - ts_st->service->last_pcr) / (90000.0 * 300),
-                           (int)bytes_diff);
-                    adjustment = 0;
-                }
-            }
-            ts_st->service->last_pcr_bytes = bytes;
-            ts_st->service->tsi_dbg_prev_pcr_adjustment = adjustment;
-
             set_af_flag(buf, 0x10);
             q = get_ts_payload_start(buf);
 
@@ -1355,8 +1334,7 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
             else
                 pcr = (dts - delay) * 300;
 
-            pcr = service_time + adjustment;
-            ts_st->service->last_pcr = pcr;
+            pcr = tsi_adjust_pcr(s, ts_st, service_time, avio_tell(s->pb));
 
             if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
                 av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
@@ -1557,6 +1535,35 @@ static const int64_t TSI_BUFFER_LOW  = 2000 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_TARGET = 4000 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_HIGH = 15000 * 90000LL / 1000;
 static const int64_t TSI_MAX_AUDIO_PACKET_DURATION = 120 * 90000LL / 1000;
+
+int64_t tsi_adjust_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int64_t pcr, int64_t bytes)
+{
+    MpegTSWrite *ts = s->priv_data;
+    pcr -=  TSI_MAX_PCR_ADJUSTMENT * 300;
+    if (ts->mux_rate > 1 && ts_st->service->last_pcr != AV_NOPTS_VALUE){
+        int64_t adjustment = 0;
+        int64_t bytes_diff = bytes - ts_st->service->last_pcr_bytes;
+        int64_t pcr_diff = pcr - ts_st->service->last_pcr;
+        int64_t tmp = ts_st->service->last_pcr_remainder + bytes_diff * 8 * PCR_TIME_BASE;
+        int64_t exp = tmp / ts->mux_rate;
+        ts_st->service->last_pcr_remainder = tmp % ts->mux_rate;
+        adjustment = exp - pcr_diff;
+        if (llabs(adjustment) >= TSI_MAX_PCR_ADJUSTMENT * 300) {
+            // TODO: disable warning after buffering ?
+            av_log(s, AV_LOG_WARNING, "[tsi] pcr ajustment exceeds limit, resetting to zero (was %9.6fsec, prev %.6fsec, pcr-diff %.6fsec, bytes %d) \n",
+                   adjustment / (300.0 * 90000.0),
+                   ts_st->service->tsi_dbg_prev_pcr_adjustment / (300.0 * 90000.0),
+                   (pcr - ts_st->service->last_pcr) / (90000.0 * 300),
+                   (int)bytes_diff);
+            adjustment = 0;
+        }
+        pcr += adjustment;
+        ts_st->service->tsi_dbg_prev_pcr_adjustment = adjustment;
+    }
+    ts_st->service->last_pcr_bytes = bytes;
+    ts_st->service->last_pcr = pcr;
+    return pcr;
+}
 
 static size_t tsi_buffer_size(MpegTSWriteStream *ts_st)
 {
