@@ -1941,11 +1941,11 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
 static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in, int flush)
 {
-    //return ff_interleave_packet_per_dts(s, out, in, flush);
-    if (in) {
-        // out packet is uninitialized here so we can't use av_packet_ref
-        av_copy_packet(out, in);
-    }
+    MpegTSWrite *ts = s->priv_data;
+    if (!ts->tsi_active)
+        return ff_interleave_packet_per_dts(s, out, in, flush);
+    if (in)
+        av_copy_packet(out, in); // out packet is uninitialized here so we can't use av_packet_ref
     return in != NULL;
 }
 
