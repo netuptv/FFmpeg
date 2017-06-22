@@ -262,7 +262,8 @@ static int mpegts_write_section1(MpegTSSection *s, int tid, int id,
 #define PCR_RETRANS_TIME 20
 
 typedef struct MpegTSPesPacket {
-    uint8_t *payload;
+    AVBufferRef *buf;
+    const uint8_t *payload;
     int64_t pts;
     int64_t dts;
     int payload_size;
@@ -1612,7 +1613,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         fraction_t min_val={1,0}, cur_val;
         for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
             bytes += end->guessed_paketized_size;
-            cur_val = (fraction_t){(end->dts - service_time) * first_bytes, bytes};
+            cur_val = (fraction_t){end->dts - service_time, bytes};
             if (cur_val.num * min_val.den < min_val.num * cur_val.den)
                 min_val = cur_val;
         }
@@ -1784,7 +1785,11 @@ static void tsi_remove_empty_packet(MpegTSWriteStream *ts_st)
     MpegTSPesPacket *old_head = tsi_buffer_head(ts_st);
     ts_st->buffer_packets -= 1;
     ts_st->buffer_bytes -= old_head->payload_size;
-    av_freep(&old_head->payload);
+    if(old_head->buf)
+        av_buffer_unref(&old_head->buf);
+    else
+        av_freep(&old_head->payload);
+
     ts_st->packets_head++;
 
     if (ts_st->packets_head != ts_st->packets_tail) {
@@ -1949,7 +1954,7 @@ static void* tsi_thread(void *opaque)
 
 static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
                              const uint8_t * payload, int payload_size,
-                             int64_t pts, int64_t dts, const int key, const int stream_id)
+                             int64_t pts, int64_t dts, const int key, const int stream_id, AVBufferRef *owned_buf)
 {
     //TODO: NOPTS, buffer overflow, no-sub-stream, MPTS?
     //TODO: flush called on stream close
@@ -1958,6 +1963,11 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSPesPacket* pes_packet;
+
+    /*if (owned_buf) {
+        if (owned_buf->data != payload || owned_buf->size != payload_size)
+            av_log(s, AV_LOG_INFO, "[tsi] offs %6d size %6d/%6d\n", (int)(payload - owned_buf->data), payload_size, owned_buf->size);
+    }*/
 
     //TODO: remove debug
     {
@@ -1975,6 +1985,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 
     if (dts == AV_NOPTS_VALUE) {
         av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts==NOPTS \n", ts_st->pid);
+        av_buffer_unref(&owned_buf);
         return;
     }
 
@@ -1985,6 +1996,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     if (ts_st->buffer_packets>0 && dts < last_packet->dts) {
         av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts<prev_dts (%ld<%ld) \n", ts_st->pid,
                pes_packet->dts, last_packet->dts);
+        av_buffer_unref(&owned_buf);
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
     }
@@ -1994,7 +2006,11 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         tsi_dbg_snprintf_buffers(buf_before, sizeof(buf_after), s, NULL, ts_st);
         while (tsi_buffer_size(ts_st) > tsi_buffer_capacity(ts_st) / 2 || ts_st->buffer_duration_dts > TSI_BUFFER_TARGET) {
             MpegTSPesPacket *pkt = tsi_buffer_tail(ts_st);
-            av_free(last_packet->payload);
+            if (last_packet->buf)
+                av_buffer_unref(&last_packet->buf);
+            else
+                av_freep(&last_packet->payload);
+
             ts_st->buffer_packets--;
             ts_st->buffer_bytes -= pkt->payload_size;
             ts_st->packets_tail--;
@@ -2014,7 +2030,14 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
             && ts_st->buffer_packets > 1
             && last_packet->dts + TSI_MAX_AUDIO_PACKET_DURATION >= dts) {
-        last_packet->payload = av_realloc(last_packet->payload, last_packet->payload_size + payload_size);
+        if (last_packet->buf) {
+            //if(last_packet->buf->size>last_packet->payload_size)
+            //    av_log(s, AV_LOG_INFO, "[tsi] xxx %d > %d \n", last_packet->buf->size, last_packet->payload_size);
+            av_buffer_realloc(&last_packet->buf, FFMAX(4096, last_packet->payload_size + payload_size)); //TODO: check ENOMEM?
+            last_packet->payload = last_packet->buf->data;
+        } else {
+            last_packet->payload = av_realloc(last_packet->payload, last_packet->payload_size + payload_size);
+        }
         memcpy(last_packet->payload + last_packet->payload_size, payload, payload_size);
         last_packet->payload_size += payload_size;
         pes_packet->guessed_paketized_size = tsi_guess_paketized_size(last_packet->payload_size);
@@ -2025,8 +2048,12 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 
     ts_st->packets_tail++;
     pes_packet = tsi_buffer_tail(ts_st);
-    pes_packet->payload = av_malloc(payload_size);
-    memcpy(pes_packet->payload, payload, payload_size);
+    pes_packet->buf = owned_buf;
+    pes_packet->payload = payload;
+    if (!owned_buf) {
+        pes_packet->payload = av_malloc(payload_size);
+        memcpy(pes_packet->payload, payload, payload_size);
+    }
     pes_packet->payload_size = payload_size;
     pes_packet->guessed_paketized_size = tsi_guess_paketized_size(payload_size);
     pes_packet->pts = pts;
@@ -2377,9 +2404,19 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
 
 #if 1
     if (1) { // if tsi
+        AVBufferRef *tmp=NULL;
+        if (data) {
+            tmp = av_buffer_create(data, size, av_buffer_default_free, NULL, 0);
+        } else if (pkt->buf){
+            tmp = av_buffer_ref(pkt->buf);
+        } else {
+            av_buffer_realloc(&tmp, size);
+            memcpy(tmp->data, buf, size);
+            buf = tmp->data;
+        }
         mpegts_write_pes(s, st, buf, size, pts, dts,
-                         pkt->flags & AV_PKT_FLAG_KEY, stream_id);
-        av_free(data);
+                         pkt->flags & AV_PKT_FLAG_KEY, stream_id, tmp);
+        if (!tmp) av_free(data);
         return 0;
     }
 #else
@@ -2448,7 +2485,7 @@ static void mpegts_write_flush(AVFormatContext *s)
         if (ts_st->payload_size > 0) {
             mpegts_write_pes(s, st, ts_st->payload, ts_st->payload_size,
                              ts_st->payload_pts, ts_st->payload_dts,
-                             ts_st->payload_flags & AV_PKT_FLAG_KEY, -1);
+                             ts_st->payload_flags & AV_PKT_FLAG_KEY, -1, NULL);
             ts_st->payload_size = 0;
             ts_st->opus_queued_samples = 0;
         }
@@ -2501,7 +2538,11 @@ static void mpegts_deinit(AVFormatContext *s)
         MpegTSWriteStream *ts_st = st->priv_data;
         if (ts_st) {
             for (MpegTSPesPacket *pkt = tsi_buffer_head(ts_st); pkt; pkt = tsi_buffer_next(ts_st, pkt))
-                av_free(pkt->payload);
+                if (pkt->buf)
+                    av_buffer_unref(&pkt->buf);
+                else
+                    av_freep(&pkt->payload);
+
 
             av_freep(&ts_st->payload);
             if (ts_st->amux) {
