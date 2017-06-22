@@ -266,6 +266,7 @@ typedef struct MpegTSPesPacket {
     int64_t pts;
     int64_t dts;
     int payload_size;
+    int guessed_paketized_size;
     int key;
     int stream_id;
 }MpegTSPesPacket;
@@ -1252,15 +1253,15 @@ int64_t tsi_adjust_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int64_t pcr
  * number of TS packets. The final TS packet is padded using an oversized
  * adaptation header to exactly fill the last TS packet.
  * NOTE: 'payload' contains a complete PES payload. */
-static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
-                             const uint8_t * const payload, const int payload_size,
+static int mpegts_write_pes1(AVFormatContext *s, AVStream *st,
+                             const uint8_t * payload, int payload_size,
                              int64_t pts, int64_t dts, const int key, const int stream_id, int is_start, int64_t service_time)
 {
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSWrite *ts = s->priv_data;
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
-    int val, len, header_len, write_pcr;
+    int val, len, header_len, write_pcr = 0;
     const int is_dvb_subtitle = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE);
     int64_t pcr = -1; /* avoid warning */
     int64_t delay = av_rescale(s->max_delay, 90000, AV_TIME_BASE);
@@ -1271,14 +1272,14 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
         force_pat = 1;
     }
 
-    if(!is_start)
+    if (is_dvb_subtitle) payload_size++;
+
+    while (payload_size > 0) {
+#if 0
+        retransmit_si_info(s, force_pat, dts);
         force_pat = 0;
 
-    if (1) {
-        //retransmit_si_info(s, force_pat, dts);
-
         write_pcr = 0;
-#if 0
         if (ts_st->pid == ts_st->service->pcr_pid) {
             if (ts->mux_rate > 1 || is_start) // VBR pcr period is based on frames
                 ts_st->service->pcr_packet_count++;
@@ -1288,6 +1289,7 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
                 write_pcr = 1;
             }
         }
+
         if (ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
             (dts - get_pcr(ts, s->pb) / 300) > delay) {
             /* pcr insert gets priority over null packet insert */
@@ -1296,7 +1298,7 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
             else
                 mpegts_insert_null_packet(s);
             /* recalculate write_pcr and possibly retransmit si_info */
-            return 0;
+            continue;
         }
 #endif
 
@@ -1477,8 +1479,11 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
         /* header size */
         header_len = q - buf;
         /* data len */
-        len = FFMIN(TS_PACKET_SIZE - header_len, payload_size + (is_dvb_subtitle?1:0) );
+        len = TS_PACKET_SIZE - header_len;
+        if (len > payload_size)
+            len = payload_size;
         int stuffing_len = TS_PACKET_SIZE - header_len - len;
+
         if (stuffing_len > 0) {
             /* add stuffing with AFC */
             if (buf[3] & 0x20) {
@@ -1501,13 +1506,15 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
             }
         }
 
-        if (is_dvb_subtitle && payload_size+1 == len) {
+        if (is_dvb_subtitle && payload_size == len) {
             memcpy(buf + TS_PACKET_SIZE - len, payload, len - 1);
             buf[TS_PACKET_SIZE - 1] = 0xff; /* end_of_PES_data_field_marker: an 8-bit field with fixed contents 0xff for DVB subtitle */
         } else {
             memcpy(buf + TS_PACKET_SIZE - len, payload, len);
         }
 
+        payload      += len;
+        payload_size -= len;
         mpegts_prefix_m2ts_header(s);
 
         int64_t t0 = av_gettime_relative();
@@ -1521,11 +1528,10 @@ static int mpegts_write_pes1(AVFormatContext *s, const AVStream *st,
                     (t - t0) / 1000000.0);
             }
         }
+        break; // only one packet
     }
-    if(len>=payload_size){
-        ts_st->prev_payload_key = key;
-    }
-    return FFMIN(len, payload_size);
+    ts_st->prev_payload_key = key;
+    return is_dvb_subtitle && payload_size<=0 ? len-1 : len;
 }
 
 //TODO: AVOption ?
@@ -1590,6 +1596,13 @@ static MpegTSPesPacket* tsi_buffer_next(MpegTSWriteStream *ts_st, MpegTSPesPacke
     return &ts_st->packets[(unsigned)(current - ts_st->packets + 1) % tsi_buffer_capacity(ts_st) ];
 }
 
+static int64_t tsi_guess_paketized_size(int64_t pes_size)
+{
+    //((DEFAULT_PES_HEADER_FREQ - 1) * 184 + 170)
+    return 188 * (1 + (FFMAX(0, pes_size-170)+184-1)/184 );
+    //return pes_size;
+}
+
 static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
 {
     //TODO: a/v offsets?
@@ -1603,14 +1616,14 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
     int64_t res;
     int64_t service_time = ts_st->service_time;
     MpegTSPesPacket *end = tsi_buffer_head(ts_st);
-    uint64_t first_bytes = end->payload_size;
+    uint64_t first_bytes = end->guessed_paketized_size;
     uint64_t bytes=0;
 
     if (1) {
         typedef struct fraction_t { int64_t num; int64_t den; } fraction_t;
         fraction_t min_val={1,0}, cur_val;
         for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
-            bytes += end->payload_size;
+            bytes += end->guessed_paketized_size;
             cur_val = (fraction_t){(end->dts - service_time) * first_bytes, bytes};
             if (cur_val.num * min_val.den < min_val.num * cur_val.den)
                 min_val = cur_val;
@@ -1619,7 +1632,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
     } else {
         int64_t min_time = INT64_MAX;
         for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
-            bytes += end->payload_size;
+            bytes += end->guessed_paketized_size;
             min_time = FFMIN(min_time, (end->dts-service_time) * first_bytes / bytes);
         }
         res = min_time;
@@ -1628,14 +1641,14 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
 #else
     {
         MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
-        int64_t first_bytes = pkt->payload_size;
+        int64_t first_bytes = pkt->guessed_paketized_size;
         int64_t bytes = 0;
         int64_t duration = 0;
         int64_t min_time = ts_st->packet_start_time;
         int64_t max_time = pkt->dts;
         int64_t prev_dts = ts_st->packet_start_time;
         for ( ; pkt && duration < TSI_BUFFER_TARGET; pkt = tsi_buffer_next(ts_st, pkt)) {
-            bytes += pkt->payload_size;
+            bytes += pkt->guessed_paketized_size;
             //FIXME: different discontinuities?
             if (pkt->dts - prev_dts < TSI_DISCONTINUITY_THRESHOLD) { // FIXME: what else? += prev delta?
                 duration += pkt->dts - prev_dts;
@@ -2017,6 +2030,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         last_packet->payload = av_realloc(last_packet->payload, last_packet->payload_size + payload_size);
         memcpy(last_packet->payload + last_packet->payload_size, payload, payload_size);
         last_packet->payload_size += payload_size;
+        pes_packet->guessed_paketized_size = tsi_guess_paketized_size(last_packet->payload_size);
         ts_st->buffer_bytes += payload_size;
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
@@ -2027,6 +2041,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
     pes_packet->payload = av_malloc(payload_size);
     memcpy(pes_packet->payload, payload, payload_size);
     pes_packet->payload_size = payload_size;
+    pes_packet->guessed_paketized_size = tsi_guess_paketized_size(payload_size);
     pes_packet->pts = pts;
     pes_packet->dts = dts;
     pes_packet->key = key;
