@@ -1483,7 +1483,6 @@ static int mpegts_write_pes1(AVFormatContext *s, AVStream *st,
         if (len > payload_size)
             len = payload_size;
         int stuffing_len = TS_PACKET_SIZE - header_len - len;
-
         if (stuffing_len > 0) {
             /* add stuffing with AFC */
             if (buf[3] & 0x20) {
@@ -1516,18 +1515,7 @@ static int mpegts_write_pes1(AVFormatContext *s, AVStream *st,
         payload      += len;
         payload_size -= len;
         mpegts_prefix_m2ts_header(s);
-
-        int64_t t0 = av_gettime_relative();
-
         avio_write(s->pb, buf, TS_PACKET_SIZE);
-
-        { //TODO: remove debug
-            int64_t t = av_gettime_relative();
-            if (t - t0 > 10000 ) {
-                av_log(s, AV_LOG_WARNING, "[tsi] avio_write: call duration %.3f sec\n",
-                    (t - t0) / 1000000.0);
-            }
-        }
         break; // only one packet
     }
     ts_st->prev_payload_key = key;
@@ -1909,7 +1897,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                                     ts_st->packet_consumed_bytes == 0,
                                     ts_st->service_time * 300
                                     );
-        { //TODO: remove debug
+        { //TODO: remove debug / calc duration for N call?
             int64_t t = av_gettime_relative();
             if (t - t0 > 10000 ) {
                 av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes1: call duration %.3f sec\n",
