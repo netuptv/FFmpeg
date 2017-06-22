@@ -1627,6 +1627,16 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         res = min_time;
     }
     ts_st->packet_end_time = service_time + res;
+    /*
+    av_log(s, AV_LOG_WARNING, "[tsi] service#%x pid#%x tsi_schedule_first_packet: bytes=%7d/%7d dts=%9.3f time=%9.3f - %9.3f, dts_diff=%9.3f\n",
+           ts_st->service->sid, ts_st->pid,
+           first_bytes, bytes,
+           tsi_buffer_head(ts_st)->dts / 90000.0,
+           ts_st->packet_start_time / 90000.0,
+           ts_st->packet_end_time / 90000.0,
+           (tsi_buffer_head(ts_st)->dts - ts_st->packet_end_time) / 90000.0
+           );
+    */
 #else
     {
         MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
@@ -1868,10 +1878,12 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         if (ts->mux_rate > 1) {// && ts_st->pid == ts_st->service->pcr_pid){ // TODO: only pcr pid?
             int64_t expected; // TODO: rename
             int64_t bytes = avio_tell(s->pb);
-            if(ts->rate_last_streamtime==0){ // FIXME: ?
+            if(ts->rate_last_streamtime==AV_NOPTS_VALUE){ // FIXME: ==0 ?
                 ts->rate_last_streamtime = ts->ts_stream_time;
                 ts->rate_last_bytes = bytes;
             }
+            //av_log(s, AV_LOG_WARNING, "[tsi] pid#%03x consumed=%6d time=%.3f\n", ts->ts_stream_time/90000.0,
+            //       ts_st->pid, ts_st->packet_consumed_bytes);
             expected = ts->mux_rate * (ts->ts_stream_time - ts->rate_last_streamtime) / (8 * 90000)
                     - (bytes - ts->rate_last_bytes);
             if (expected < -188 * 20 ) { // TODO: threshold?
@@ -1881,7 +1893,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                 ts->rate_last_bytes = bytes;
             }
             if (expected > (ts->mux_rate / 8) / 20 ) {
-                av_log(s, AV_LOG_WARNING, "[tsi] [WTF] NULL packet burst (%d packets)\n",(int)expected/188);
+                av_log(s, AV_LOG_WARNING, "[tsi] [WTF] NULL packet burst (%d packets)\n", (int)expected / 188);
             }
             while (expected > 188) {
                 mpegts_insert_null_packet(s);
@@ -1995,7 +2007,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
 
     if (ts_st->buffer_packets>0 && dts < last_packet->dts) {
         av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts<prev_dts (%ld<%ld) \n", ts_st->pid,
-               pes_packet->dts, last_packet->dts);
+               dts, last_packet->dts);
         av_buffer_unref(&owned_buf);
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
@@ -2026,6 +2038,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         return;
     }
 
+    //TODO: join first audio packet?
     // join audio pes-packets
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
             && ts_st->buffer_packets > 1
@@ -2040,7 +2053,7 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         }
         memcpy(last_packet->payload + last_packet->payload_size, payload, payload_size);
         last_packet->payload_size += payload_size;
-        pes_packet->guessed_paketized_size = tsi_guess_paketized_size(last_packet->payload_size);
+        last_packet->guessed_paketized_size = tsi_guess_paketized_size(last_packet->payload_size);
         ts_st->buffer_bytes += payload_size;
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
