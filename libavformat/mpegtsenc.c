@@ -1886,7 +1886,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 
         //FIXME: perform PCR ajustment here +-delta
 
-        int64_t t0 = av_gettime_relative();
+        //int64_t t0 = av_gettime_relative();
         int len = mpegts_write_pes1(s, st,
                                     pes_packet->payload + ts_st->packet_consumed_bytes,
                                     pes_packet->payload_size - ts_st->packet_consumed_bytes,
@@ -1897,13 +1897,13 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                                     ts_st->packet_consumed_bytes == 0,
                                     ts_st->service_time * 300
                                     );
-        { //TODO: remove debug / calc duration for N call?
+        /*{ //TODO: remove debug / calc duration for N call?
             int64_t t = av_gettime_relative();
             if (t - t0 > 10000 ) {
                 av_log(s, AV_LOG_WARNING, "[tsi] mpegts_write_pes1: call duration %.3f sec\n",
                     (t - t0) / 1000000.0);
             }
-        }
+        }*/
         ts_st->packet_consumed_bytes += len;
         ts_st->service_time = ts_st->packet_start_time + (ts_st->packet_end_time - ts_st->packet_start_time) * ts_st->packet_consumed_bytes / pes_packet->payload_size;
 
@@ -1951,18 +1951,13 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
                              const uint8_t * payload, int payload_size,
                              int64_t pts, int64_t dts, const int key, const int stream_id)
 {
-    // TODO: NOPTS, buffer overflow, no-sub-stream, MPTS?
+    //TODO: NOPTS, buffer overflow, no-sub-stream, MPTS?
     //TODO: flush called on stream close
     //TODO: pass buffer ref to mpegts_write_pes
 
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSPesPacket* pes_packet;
-
-    if (dts == AV_NOPTS_VALUE) {
-        av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts==NOPTS \n", ts_st->pid);
-        return;
-    }
 
     //TODO: remove debug
     {
@@ -1978,7 +1973,11 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
         *prev = t;
     }
 
-#if 1
+    if (dts == AV_NOPTS_VALUE) {
+        av_log(s, AV_LOG_ERROR, "[tsi] [pid 0x%x] Dropping packet with dts==NOPTS \n", ts_st->pid);
+        return;
+    }
+
     pthread_mutex_lock(&ts->tsi_mutex);
 
     MpegTSPesPacket *last_packet = tsi_buffer_tail(ts_st);
@@ -2068,16 +2067,6 @@ static void mpegts_write_pes(AVFormatContext *s, const AVStream *st,
                 ts_st->service->sid, (t - *prev) / 1000000.0);
         }
     }
-
-#else
-    int is_start = 1;
-    do {
-        int len = mpegts_write_pes1(s, st, payload, payload_size, pts, dts, key, stream_id, is_start, 0);
-        payload += len;
-        payload_size -= len;
-        is_start = 0;
-    } while (payload_size > 0);
-#endif
 }
 
 
