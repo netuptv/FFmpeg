@@ -40,8 +40,6 @@
 #include <pthread.h>
 #endif
 
-static const int64_t TSI_MAX_PCR_ADJUSTMENT = 5 * 90000LL / 1000; // FIXME: move
-
 #define PCR_TIME_BASE 27000000
 
 /* write DVB SI sections */
@@ -150,6 +148,7 @@ typedef struct MpegTSWrite {
         int64_t dbg_buffer_report_time;
         int active;
         int is_realtime;
+        int sync_service_times;
 #if HAVE_PTHREADS
         pthread_t thread;
         pthread_mutex_t mutex;
@@ -1263,7 +1262,7 @@ static uint8_t *get_ts_payload_start(uint8_t *pkt)
         return pkt + 4;
 }
 
-int64_t tsi_adjust_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int64_t pcr, int64_t bytes);
+int64_t tsi_get_adjusted_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int force);
 
 /* Add a PES header to the front of the payload, and segment into an integer
  * number of TS packets. The final TS packet is padded using an oversized
@@ -1342,16 +1341,14 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             set_af_flag(buf, 0x40);
             q = get_ts_payload_start(buf);
         }
-        if (tsi_active && ts_st->pid == ts_st->service->pcr_pid && ts_st->service->tsi.last_pcr + 3000*300 < ts_st->tsi.service_time * 300)
+        if (tsi_active && ts_st->pid == ts_st->service->pcr_pid
+                && (pcr=tsi_get_adjusted_pcr(s, ts_st, write_pcr))!=AV_NOPTS_VALUE)
             write_pcr = 1;
         if (write_pcr) {
             set_af_flag(buf, 0x10);
             q = get_ts_payload_start(buf);
 
-            if (tsi_active) {
-                pcr = tsi_adjust_pcr(s, ts_st, ts_st->tsi.service_time * 300, avio_tell(s->pb));
-            } else { // keep ffmpeg indention in this block
-
+            if (!tsi_active) { // keep ffmpeg indention in this block
             // add 11, pcr references the last byte of program clock reference base
             if (ts->mux_rate > 1)
                 pcr = get_pcr(ts, s->pb);
@@ -1550,10 +1547,14 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
 //FIXME: write constraints/dependencies for this values
 static const int64_t TSI_DISCONTINUITY_THRESHOLD = 1000 * 90000LL / 1000;
 static const int64_t TSI_WINDOW = 950 * 90000LL / 1000;
-static const int64_t TSI_BUFFER_LOW  = 2000 * 90000LL / 1000;
-static const int64_t TSI_BUFFER_TARGET = 4000 * 90000LL / 1000;
-static const int64_t TSI_BUFFER_HIGH = 15000 * 90000LL / 1000;
+static const int64_t TSI_BUFFER_LOW    =  2000 * 90000LL / 1000;
+static const int64_t TSI_BUFFER_TARGET =  4000 * 90000LL / 1000;
+static const int64_t TSI_BUFFER_HIGH   = 15000 * 90000LL / 1000;
 static const int64_t TSI_MAX_AUDIO_PACKET_DURATION = 120 * 90000LL / 1000;
+static const int64_t TSI_SDT_PERIOD = 1000 * 90000LL / 1000;
+static const int64_t TSI_PAT_PERIOD =   90 * 90000LL / 1000;
+static const int64_t TSI_PCR_PERIOD         = 35 * 27000000LL / 1000; // pcr period in 27MHz units
+static const int64_t TSI_MAX_PCR_ADJUSTMENT =  5 * 27000000LL / 1000; // in 27MHz units
 
 #define tsi_log(s, level, format, ...) \
     av_log(s, level, "[tsi] t#%.3f " format, \
@@ -1564,7 +1565,7 @@ static const int64_t TSI_MAX_AUDIO_PACKET_DURATION = 120 * 90000LL / 1000;
 
 #define tsi_log_ts_st(s, ts_st, level, format, ...) \
     tsi_log_svc(s, ts_st->service, level, "st#%.3f pid#%x " format, \
-    (ts_st->tsi.service_time+ts_st->service->tsi.time_offset)/90000.0, ts_st->pid, ##__VA_ARGS__)
+    ts_st->tsi.service_time/90000.0, ts_st->pid, ##__VA_ARGS__)
 /*
 __attribute__ ((format (printf, 4, 5)))
 static void tsi_log(AVFormatContext* s, MpegTSWriteStream* ts_st, int level, const char *fmt, ...)
@@ -1578,32 +1579,44 @@ static void tsi_log(AVFormatContext* s, MpegTSWriteStream* ts_st, int level, con
 }
 */
 
-int64_t tsi_adjust_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int64_t pcr, int64_t bytes)
+int64_t tsi_get_adjusted_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int force)
 {
     MpegTSWrite *ts = s->priv_data;
-    pcr -=  TSI_MAX_PCR_ADJUSTMENT * 300;
-    if (ts->mux_rate > 1 && ts_st->service->tsi.last_pcr != AV_NOPTS_VALUE){
+    int64_t pcr = ts_st->tsi.service_time * 300;
+    int64_t bytes;
+    MpegTSService *service = ts_st->service;
+    if (ts->tsi.sync_service_times) {
+        pcr += ts_st->service->tsi.time_offset * 300;
+        service = ts->services[0];
+    }
+    if (service->tsi.last_pcr + TSI_PCR_PERIOD - TSI_MAX_PCR_ADJUSTMENT > pcr && !force)
+        return AV_NOPTS_VALUE;
+    if (ts->mux_rate <= 1)
+        return pcr;
+    bytes = avio_tell(s->pb);
+    pcr -=  TSI_MAX_PCR_ADJUSTMENT;
+    if (service->tsi.last_pcr != AV_NOPTS_VALUE){
         int64_t adjustment = 0;
-        int64_t bytes_diff = bytes - ts_st->service->tsi.last_pcr_bytes;
-        int64_t pcr_diff = pcr - ts_st->service->tsi.last_pcr;
-        int64_t tmp = ts_st->service->tsi.last_pcr_remainder + bytes_diff * 8 * PCR_TIME_BASE;
+        int64_t bytes_diff = bytes - service->tsi.last_pcr_bytes;
+        int64_t pcr_diff = pcr - service->tsi.last_pcr;
+        int64_t tmp = service->tsi.last_pcr_remainder + bytes_diff * 8 * PCR_TIME_BASE;
         int64_t exp = tmp / ts->mux_rate;
-        ts_st->service->tsi.last_pcr_remainder = tmp % ts->mux_rate;
+        service->tsi.last_pcr_remainder = tmp % ts->mux_rate;
         adjustment = exp - pcr_diff;
-        if (llabs(adjustment) >= TSI_MAX_PCR_ADJUSTMENT * 300) {
+        if (llabs(adjustment) >= TSI_MAX_PCR_ADJUSTMENT) {
             // TODO: disable warning after buffering ?
             tsi_log_ts_st(s, ts_st, AV_LOG_WARNING, "pcr ajustment exceeds limit, resetting to zero (was %9.6fsec, prev %.6fsec, pcr-diff %.6fsec, bytes %d)\n",
-                   adjustment / (300.0 * 90000.0),
-                   ts_st->service->tsi.dbg_prev_pcr_adjustment / (300.0 * 90000.0),
-                   (pcr - ts_st->service->tsi.last_pcr) / (90000.0 * 300),
+                   adjustment / (300 * 90000.0),
+                   service->tsi.dbg_prev_pcr_adjustment / (300 * 90000.0),
+                   (pcr - service->tsi.last_pcr) / (300 * 90000.0),
                    (int)bytes_diff);
             adjustment = 0;
         }
         pcr += adjustment;
-        ts_st->service->tsi.dbg_prev_pcr_adjustment = adjustment;
+        service->tsi.dbg_prev_pcr_adjustment = adjustment;
     }
-    ts_st->service->tsi.last_pcr_bytes = bytes;
-    ts_st->service->tsi.last_pcr = pcr;
+    service->tsi.last_pcr_bytes = bytes;
+    service->tsi.last_pcr = pcr;
     return pcr;
 }
 
@@ -1917,7 +1930,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
 
         // SDT packets
-        if (ts->tsi.last_sdt + 1*90000 < new_stream_time) {
+        if (ts->tsi.last_sdt + TSI_SDT_PERIOD < new_stream_time) {
             ts->tsi.last_sdt = new_stream_time;
             mpegts_write_sdt(s);
         }
@@ -1927,7 +1940,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
             force_pat = pes_packet->key;// FIXME: && !ts_st->prev_payload_key;
             force_pat = force_pat || ts->flags & MPEGTS_FLAG_PAT_PMT_AT_FRAMES;
         }
-        if(ts->tsi.last_pat + 8000 < new_stream_time || force_pat) {
+        if(ts->tsi.last_pat + TSI_PAT_PERIOD < new_stream_time || force_pat) {
             ts->tsi.last_pat = new_stream_time;
             mpegts_write_pat(s);
             for (int i = 0; i < ts->nb_services; i++) // FIXME: send only one PMT at a time?
@@ -1964,8 +1977,8 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         mpegts_write_pes(s, st,
                                     pes_packet->payload + ts_st->tsi.packet_consumed_bytes,
                                     pes_packet->payload_size - ts_st->tsi.packet_consumed_bytes,
-                                    pes_packet->pts,
-                                    pes_packet->dts,
+                                    pes_packet->pts + (ts->tsi.sync_service_times ? ts_st->service->tsi.time_offset : 0),
+                                    pes_packet->dts + (ts->tsi.sync_service_times ? ts_st->service->tsi.time_offset : 0),
                                     pes_packet->key,
                                     pes_packet->stream_id
                                     );
@@ -2756,6 +2769,9 @@ static const AVOption options[] = {
     /* tsi options */
     { "tsi_realtime", "Realtime streaming",
       offsetof(MpegTSWrite, tsi.is_realtime), AV_OPT_TYPE_BOOL,
+      { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
+    { "tsi_sync_service_times", "Synchronize service times shifting pts/dts/pcr",
+      offsetof(MpegTSWrite, tsi.sync_service_times), AV_OPT_TYPE_BOOL,
       { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { NULL },
 };
