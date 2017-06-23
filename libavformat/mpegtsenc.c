@@ -1535,6 +1535,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
 }
 
 //TODO: AVOption ?
+//FIXME: write constraints/dependencies for this values
 static const int64_t TSI_DISCONTINUITY_THRESHOLD = 1000 * 90000LL / 1000;
 static const int64_t TSI_WINDOW = 950 * 90000LL / 1000;
 static const int64_t TSI_BUFFER_LOW  = 2000 * 90000LL / 1000;
@@ -1543,8 +1544,12 @@ static const int64_t TSI_BUFFER_HIGH = 15000 * 90000LL / 1000;
 static const int64_t TSI_MAX_AUDIO_PACKET_DURATION = 120 * 90000LL / 1000;
 
 #if 1
+//#define tsi_log(s, ts_st, level, format, ...) \
+//    av_log(s, level, "[tsi] service#%x pid#%x " format, ts_st->service->sid, ts_st->pid, ##__VA_ARGS__)
 #define tsi_log(s, ts_st, level, format, ...) \
-    av_log(s, level, "[tsi] service#%x pid#%x " format, ts_st->service->sid, ts_st->pid, ##__VA_ARGS__)
+    av_log(s, level, "[tsi] t=%9.3f st=%9.3f service#%x pid#%x " format, \
+    ((MpegTSWrite*)s->priv_data)->ts_stream_time/90000.0, (ts_st->service_time+ts_st->service->time_offset)/90000.0,\
+    ts_st->service->sid, ts_st->pid, ##__VA_ARGS__)
 #else
 __attribute__ ((format (printf, 4, 5)))
 static void tsi_log(AVFormatContext* s, MpegTSWriteStream* ts_st, int level, const char *fmt, ...)
@@ -1827,15 +1832,19 @@ static void tsi_remove_empty_packet(AVFormatContext *s, MpegTSWriteStream *ts_st
         if (dts_diff < TSI_DISCONTINUITY_THRESHOLD) {
             ts_st->buffer_duration_dts -= dts_diff;
             ts_st->packet_start_time = ts_st->packet_end_time;
-            ts_st->packet_end_time = AV_NOPTS_VALUE;
             //FIXME: update stream_time?
         } else {
             //FIXME: wtf???
+            tsi_log(s, ts_st, AV_LOG_WARNING, "tsi_remove_empty_packet dts discontinuity (diff=%.3fsec %.3fsec -> %.3fsec) "
+                                              "(old_interval=%.3f-%.3f service_time=%.3f new_start=%.3f)\n",
+                   dts_diff / 90000.0, old_head->dts / 90000.0, new_head->dts / 90000.0,
+                    ts_st->packet_start_time/90000.0, ts_st->packet_end_time/90000.0,
+                    ts_st->service_time/90000.0,
+                    (new_head->dts - (old_head->dts - ts_st->packet_end_time))/90000.0);
             ts_st->packet_start_time = new_head->dts - (old_head->dts - ts_st->packet_end_time); // FIXME: sub prev dts delta?
             ts_st->service_time = ts_st->packet_start_time;
-            tsi_log(s, ts_st, AV_LOG_WARNING, "tsi_remove_empty_packet dts discontinuity (diff=%.3fsec %.3fsec -> %.3fsec)\n",
-                   dts_diff / 90000.0, old_head->dts / 90000.0, new_head->dts / 90000.0);
         }
+        ts_st->packet_end_time = AV_NOPTS_VALUE;
     } else {
         ts_st->service_time = AV_NOPTS_VALUE; //FIXME: need this?
         if (!flush)
@@ -1886,8 +1895,8 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
 
         if (new_stream_time < ts->ts_stream_time) {
-            tsi_log(s, ts_st, AV_LOG_ERROR, "[WTF] new_stream_time < ts->ts_stream_time (%ld < %ld)\n",
-                   new_stream_time, ts->ts_stream_time);
+            tsi_log(s, ts_st, AV_LOG_ERROR, "[WTF] new_stream_time < ts->ts_stream_time (%.3f < %.3f)\n",
+                   new_stream_time/90000.0, ts->ts_stream_time/90000.0);
         }
         ts->ts_stream_time = new_stream_time;
 
@@ -1958,7 +1967,15 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
             }
         }*/
         // ts_st->packet_consumed_bytes updated in mpegts_write_pes
+        int64_t prev_stream_time = ts_st->service_time;
         ts_st->service_time = ts_st->packet_start_time + (ts_st->packet_end_time - ts_st->packet_start_time) * ts_st->packet_consumed_bytes / pes_packet->payload_size;
+        if (ts_st->service_time < prev_stream_time) {
+            tsi_log(s, ts_st, AV_LOG_ERROR, "[WTF] ts_st->service_time decreased %.3f < %.3f (interval=%.3f-%.3f bytes=%ld/%ld)\n",
+                    ts_st->service_time/90000.0, prev_stream_time/90000.0,
+                    ts_st->packet_start_time/90000.0, ts_st->packet_end_time/90000.0,
+                    ts_st->packet_consumed_bytes, pes_packet->payload_size
+                    );
+        }
 
         if (ts_st->packet_consumed_bytes == pes_packet->payload_size) {
             tsi_remove_empty_packet(s, ts_st, flush);
@@ -1979,6 +1996,7 @@ static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in
 
 static void* tsi_thread(void *opaque)
 {
+    //int64_t dbg=0;
     AVFormatContext *s = opaque;
     MpegTSWrite *ts = s->priv_data;
     int64_t t_prev = av_gettime_relative() * 9/*0000*/ / 100/*0000*/;
@@ -1996,6 +2014,9 @@ static void* tsi_thread(void *opaque)
 
         av_usleep(10000); //TODO: AVOption?
         t_prev = t;
+        /*if( (++dbg)%(100*40) == 0 ) {
+            av_usleep(4*1000*1000); // oops!
+        }*/
     }
     return NULL;
 }
@@ -2049,16 +2070,16 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
         return;
     }
 
-    if (tsi_buffer_size(ts_st) == tsi_buffer_capacity(ts_st) || ts_st->buffer_duration_dts > TSI_BUFFER_HIGH) { //TODO: check byte size?
+    if (tsi_buffer_size(ts_st) == tsi_buffer_capacity(ts_st) || ts_st->buffer_duration_dts > TSI_BUFFER_HIGH) {
+        //TODO: check byte size? drop packets in all service streams?
         char buf_before[4096], buf_after[4096];
         tsi_dbg_snprintf_buffers(buf_before, sizeof(buf_after), s, NULL, ts_st);
         while (tsi_buffer_size(ts_st) > tsi_buffer_capacity(ts_st) / 2 || ts_st->buffer_duration_dts > TSI_BUFFER_TARGET) {
             MpegTSPesPacket *pkt = tsi_buffer_tail(ts_st);
-            if (last_packet->buf)
-                av_buffer_unref(&last_packet->buf);
+            if (pkt->buf)
+                av_buffer_unref(&pkt->buf);
             else
-                av_freep(&last_packet->payload);
-
+                av_freep(&pkt->payload);
             ts_st->buffer_packets--;
             ts_st->buffer_bytes -= pkt->payload_size;
             ts_st->packets_tail--;
