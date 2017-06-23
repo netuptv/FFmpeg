@@ -1299,7 +1299,7 @@ int av_interleaved_write_frame(AVFormatContext *s, AVPacket *pkt)
         if(s->pb && s->pb->error)
             return s->pb->error;
     }
-    if (ret>=0 && flush) {
+    if (ret>=0 && flush && s->oformat->flags & AVFMT_ALLOW_FLUSH) {
         av_log(s, AV_LOG_INFO, "[tmp] av_interleaved_write_frame flushing buffer\n");
         ret = write_packet(s, NULL);
     }
