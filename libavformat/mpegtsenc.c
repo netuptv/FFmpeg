@@ -1858,7 +1858,6 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
 {
     MpegTSWrite *ts = s->priv_data;
     tsi_schedule_services(s, flush);
-    //TODO: report stream time here
 
     { //TODO: LOG_DEBUG? stream time instead of realtime?
         int64_t t = av_gettime_relative();
@@ -2026,18 +2025,14 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
                              /*TODO: const?*/ uint8_t * payload, int payload_size,
                              int64_t pts, int64_t dts, int key, int stream_id, AVBufferRef *owned_buf)
 {
-    //TODO: NOPTS, buffer overflow, no-sub-stream, MPTS?
-    //TODO: flush called on stream close
-    //TODO: pass buffer ref to mpegts_write_pes
-
     MpegTSWrite *ts = s->priv_data;
     MpegTSWriteStream *ts_st = st->priv_data;
-    MpegTSPesPacket* pes_packet;
+    MpegTSPesPacket *last_pkt, *new_pkt;
 
-    /*if (owned_buf) {
-        if (owned_buf->data != payload || owned_buf->size != payload_size)
-            av_log(s, AV_LOG_INFO, "[tsi] offs %6d size %6d/%6d\n", (int)(payload - owned_buf->data), payload_size, owned_buf->size);
-    }*/
+    if (owned_buf) {
+        if (owned_buf->data != payload)// || owned_buf->size != payload_size)
+            tsi_log(s, AV_LOG_INFO, "strange packet offs %6d size %6d/%6d\n", (int)(payload - owned_buf->data), payload_size, owned_buf->size);
+    }
 
     //TODO: remove debug
     {
@@ -2046,7 +2041,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
         if (*prev == 0) *prev = t;
         if (t - *prev > 600000) {
             char buf[4096];
-            tsi_dbg_snprintf_buffers(buf, sizeof(buf), s, ((MpegTSWriteStream*)st->priv_data)->service, NULL);
+            tsi_dbg_snprintf_buffers(buf, sizeof(buf), s, ts_st->service, NULL);
             tsi_log_svc(s, ts_st->service, AV_LOG_WARNING, "mpegts_write_pes: last packet was %.3f sec ago (buffers %s)\n",
                    (t - *prev) / 1000000.0, buf);
         }
@@ -2061,11 +2056,11 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
 
     pthread_mutex_lock(&ts->tsi_mutex);
 
-    MpegTSPesPacket *last_packet = tsi_buffer_tail(ts_st);
+    last_pkt = tsi_buffer_tail(ts_st);
 
-    if (ts_st->buffer_packets>0 && dts < last_packet->dts) {
+    if (ts_st->buffer_packets>0 && dts < last_pkt->dts) {
         tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "dropping packet with dts<prev_dts (%ld<%ld) \n",
-               dts, last_packet->dts);
+               dts, last_pkt->dts);
         av_buffer_unref(&owned_buf);
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
@@ -2076,7 +2071,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
         char buf_before[4096], buf_after[4096];
         tsi_dbg_snprintf_buffers(buf_before, sizeof(buf_after), s, NULL, ts_st);
         while (tsi_buffer_size(ts_st) > tsi_buffer_capacity(ts_st) / 2 || ts_st->buffer_duration_dts > TSI_BUFFER_TARGET) {
-            MpegTSPesPacket *pkt = tsi_buffer_tail(ts_st);
+            MpegTSPesPacket *prev_pkt, *pkt = tsi_buffer_tail(ts_st);
             if (pkt->buf)
                 av_buffer_unref(&pkt->buf);
             else
@@ -2084,8 +2079,8 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
             ts_st->buffer_packets--;
             ts_st->buffer_bytes -= pkt->payload_size;
             ts_st->packets_tail--;
-            last_packet = tsi_buffer_tail(ts_st);
-            int64_t dts_diff = pkt->dts - last_packet->dts;
+            prev_pkt = tsi_buffer_tail(ts_st);
+            int64_t dts_diff = pkt->dts - prev_pkt->dts;
             if (dts_diff < TSI_DISCONTINUITY_THRESHOLD)
                 ts_st->buffer_duration_dts -= dts_diff;
         }
@@ -2100,55 +2095,58 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
     // join audio pes-packets
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
             && ts_st->buffer_packets > 1
-            && last_packet->dts + TSI_MAX_AUDIO_PACKET_DURATION >= dts) {
-        if (last_packet->buf) {
+            && last_pkt->dts + TSI_MAX_AUDIO_PACKET_DURATION >= dts) {
+        if (last_pkt->buf) {
             //if(last_packet->buf->size>last_packet->payload_size)
             //    av_log(s, AV_LOG_INFO, "[tsi] xxx %d > %d \n", last_packet->buf->size, last_packet->payload_size);
-            av_buffer_realloc(&last_packet->buf, FFMAX(4096, last_packet->payload_size + payload_size)); //TODO: check ENOMEM?
-            last_packet->payload = last_packet->buf->data;
+            av_buffer_realloc(&last_pkt->buf, FFMAX(4096, last_pkt->payload_size + payload_size)); //TODO: check ENOMEM?
+            last_pkt->payload = last_pkt->buf->data;
         } else {
-            last_packet->payload = av_realloc(last_packet->payload, last_packet->payload_size + payload_size);
+            last_pkt->payload = av_realloc(last_pkt->payload, last_pkt->payload_size + payload_size);
         }
-        memcpy(last_packet->payload + last_packet->payload_size, payload, payload_size);
-        last_packet->payload_size += payload_size;
-        last_packet->guessed_paketized_size = tsi_guess_paketized_size(last_packet->payload_size);
+        memcpy(last_pkt->payload + last_pkt->payload_size, payload, payload_size);
+        last_pkt->payload_size += payload_size;
+        last_pkt->guessed_paketized_size = tsi_guess_paketized_size(last_pkt->payload_size);
         ts_st->buffer_bytes += payload_size;
         pthread_mutex_unlock(&ts->tsi_mutex);
         return;
     }
 
     ts_st->packets_tail++;
-    pes_packet = tsi_buffer_tail(ts_st);
-    pes_packet->buf = owned_buf;
-    pes_packet->payload = payload;
+    new_pkt = tsi_buffer_tail(ts_st);
     if (!owned_buf) {
-        pes_packet->payload = av_malloc(payload_size);
-        memcpy(pes_packet->payload, payload, payload_size);
+        void* tmp = av_malloc(payload_size);
+        memcpy(tmp, payload, payload_size);
+        payload = tmp;
     }
-    pes_packet->payload_size = payload_size;
-    pes_packet->guessed_paketized_size = tsi_guess_paketized_size(payload_size);
-    pes_packet->pts = pts;
-    pes_packet->dts = dts;
-    pes_packet->key = key;
-    pes_packet->stream_id = stream_id;
+    *new_pkt = (MpegTSPesPacket){
+        .buf = owned_buf,
+        .payload = payload,
+        .payload_size = payload_size,
+        .guessed_paketized_size = tsi_guess_paketized_size(payload_size),
+        .pts = pts,
+        .dts = dts,
+        .key = key,
+        .stream_id = stream_id,
+    };
 
     ts_st->buffer_packets += 1;
     ts_st->buffer_bytes += payload_size;
 
     if (ts_st->buffer_packets>1) {
-        int64_t dts_diff = pes_packet->dts - last_packet->dts;
+        int64_t dts_diff = new_pkt->dts - last_pkt->dts;
         if (dts_diff < TSI_DISCONTINUITY_THRESHOLD) {// TODO: add discontinuity flag?
             ts_st->buffer_duration_dts += dts_diff;
         } else {
             //FIXME: move somewhere? only for pcr-pid?
             tsi_log_ts_st(s, ts_st, AV_LOG_WARNING, "dts discontinuity (diff=%.3fsec %.3fsec -> %.3fsec)\n",
-                   dts_diff / 90000.0, last_packet->dts / 90000.0, pes_packet->dts / 90000.0);
+                   dts_diff / 90000.0, last_pkt->dts / 90000.0, new_pkt->dts / 90000.0);
         }
     } else {
         tsi_log_ts_st(s, ts_st, AV_LOG_INFO, "got first packet \n"); // FIXME: remove
         // We don't know how to properly redistribute time in a first frame.
         // Assume worst case - it's a huge packet occupying full TSI_WINDOW.
-        ts_st->packet_start_time = pes_packet->dts - TSI_WINDOW; // FIXME: move to update_info
+        ts_st->packet_start_time = new_pkt->dts - TSI_WINDOW; // FIXME: move to update_info
         ts_st->service_time = ts_st->packet_start_time;
     }
 
