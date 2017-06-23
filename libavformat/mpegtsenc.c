@@ -1109,6 +1109,10 @@ static int mpegts_init(AVFormatContext *s)
             goto fail;
         }
         if (ts->tsi.is_realtime) {
+            //TODO: log "packet flush disabled"?
+            s->flush_packets = 0;                  // disable AVIOContext flushing from another thread
+            s->flags &= ~AVFMT_FLAG_FLUSH_PACKETS; // two flags for the same thing. One from ffmpeg, other from libav.
+
             ret = pthread_create(&ts->tsi.thread, NULL, &tsi_thread, s);
             if (ret != 0) {
                 //av_log(h, AV_LOG_ERROR, "pthread_create failed : %s\n", strerror(ret));
@@ -2750,7 +2754,7 @@ static const AVOption options[] = {
       offsetof(MpegTSWrite, sdt_period), AV_OPT_TYPE_DOUBLE,
       { .dbl = INT_MAX }, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     /* tsi options */
-    { "mpeg_realtime", "Realtime streaming (flush_packets should be 0 for realtime streaming)",
+    { "tsi_realtime", "Realtime streaming",
       offsetof(MpegTSWrite, tsi.is_realtime), AV_OPT_TYPE_BOOL,
       { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { NULL },
