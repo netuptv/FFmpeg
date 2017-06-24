@@ -1656,6 +1656,15 @@ static int64_t tsi_guess_paketized_size(int64_t pes_size)
     return 188 * (1 + (FFMAX(0, pes_size-170)+184-1)/184 );
 }
 
+typedef struct TSIRational {
+    int64_t num, den;
+} TSIRational;
+
+static int tsi_rational_compare(TSIRational a, TSIRational b) {
+    int64_t aa = a.num * b.den, bb = b.num * a.den;
+    return aa < bb ? -1 : (aa > bb ? 1 : 0);
+}
+
 static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
 {
     //TODO: a/v offsets?
@@ -1665,32 +1674,38 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
 
     //ts_st->tsi.packet_end_time = tsi_buffer_head(ts_st)->dts;
     //return;
-#if 0
-    int64_t res;
-    int64_t service_time = ts_st->tsi.service_time;
-    MpegTSPesPacket *end = tsi_buffer_head(ts_st);
-    uint64_t first_bytes = end->guessed_paketized_size;
-    uint64_t bytes=0;
-
-    if (1) {
-        typedef struct fraction_t { int64_t num; int64_t den; } fraction_t;
-        fraction_t min_val={1,0}, cur_val;
-        for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
-            bytes += end->guessed_paketized_size;
-            cur_val = (fraction_t){end->dts - service_time, bytes};
-            if (cur_val.num * min_val.den < min_val.num * cur_val.den)
-                min_val = cur_val;
+    MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
+    int64_t first_bytes = pkt->guessed_paketized_size;
+    int64_t bytes = first_bytes;
+    int64_t duration = pkt->dts - ts_st->tsi.packet_start_time;
+    TSIRational min_bitrate = {0,1}, max_bitrate = {1,0}; // [0, +infinity]
+    do {
+        MpegTSPesPacket *next = tsi_buffer_next(ts_st, pkt);
+        TSIRational new_min = {bytes, duration};
+        TSIRational new_max = {bytes, FFMAX(0, duration-TSI_WINDOW)};
+        if (tsi_rational_compare(new_min, min_bitrate) > 0) {
+            if (tsi_rational_compare(new_min, max_bitrate) > 0) {
+                tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "INTERESTING1\n");
+                break;
+            }
+            min_bitrate = new_min;
         }
-        res = first_bytes * min_val.num / min_val.den;
-    } else {
-        int64_t min_time = INT64_MAX;
-        for( ;end && end->dts-service_time<TSI_BUFFER_TARGET; end = tsi_buffer_next(ts_st, end)){
-            bytes += end->guessed_paketized_size;
-            min_time = FFMIN(min_time, (end->dts-service_time) * first_bytes / bytes);
+        if (tsi_rational_compare(new_max, max_bitrate) < 0) {
+            if (tsi_rational_compare(new_max, min_bitrate) < 0) {
+                tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "INTERESTING2\n");
+                break;
+            }
+            max_bitrate = new_max;
         }
-        res = min_time;
-    }
-    ts_st->tsi.packet_end_time = service_time + res;
+        if (!next)
+            break;
+        bytes += next->guessed_paketized_size;
+        if (next->dts - pkt->dts < TSI_DISCONTINUITY_THRESHOLD) // FIXME: what else? += prev delta?
+            duration += next->dts - pkt->dts;
+        pkt = next;
+    } while (duration<TSI_BUFFER_TARGET);
+    //FIXME: rounding?
+    ts_st->tsi.packet_end_time = ts_st->tsi.packet_start_time + first_bytes * min_bitrate.den / min_bitrate.num;
     /*
     tsi_log_ts_st(s, ts_st, AV_LOG_WARNING, "tsi_schedule_first_packet: bytes=%7d/%7d dts=%9.3f time=%9.3f - %9.3f, dts_diff=%9.3f\n",
            first_bytes, bytes,
@@ -1700,44 +1715,10 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
            (tsi_buffer_head(ts_st)->dts - ts_st->packet_end_time) / 90000.0
            );
     */
-#else
-    {
-        MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
-        int64_t first_bytes = pkt->guessed_paketized_size;
-        int64_t bytes = 0;
-        int64_t duration = 0;
-        int64_t min_time = ts_st->tsi.packet_start_time;
-        int64_t max_time = pkt->dts;
-        int64_t prev_dts = ts_st->tsi.packet_start_time;
-        for ( ; pkt && duration < TSI_BUFFER_TARGET; pkt = tsi_buffer_next(ts_st, pkt)) {
-            bytes += pkt->guessed_paketized_size;
-            //FIXME: different discontinuities?
-            if (pkt->dts - prev_dts < TSI_DISCONTINUITY_THRESHOLD) { // FIXME: what else? += prev delta?
-                duration += pkt->dts - prev_dts;
-            }
-            // FIXME: rewrite
-            int64_t time = ts_st->tsi.packet_start_time + duration * first_bytes / bytes;
-            if (time < min_time) {
-                max_time = FFMIN(max_time, min_time);
-                //av_log(s, AV_LOG_ERROR, "[pid 0x%x] INTERESTING1\n", ts_st->pid);
-                break;
-            } else {
-                max_time = FFMIN(max_time, time);
-                if (duration > TSI_WINDOW) {
-                    int64_t time = ts_st->tsi.packet_start_time +
-                            (duration - TSI_WINDOW) * first_bytes / bytes;
-                    min_time = FFMAX(min_time, time);
-                }
-            }
-            prev_dts = pkt->dts;
-        }
-        ts_st->tsi.packet_end_time = max_time;
         //FIXME: log it when PCR ajustment failed?
         //if (max_time + TSI_WINDOW == tsi_buffer_head(ts_st)->dts && ts->mux_rate > 1)
         //  av_log(s, AV_LOG_WARNING, "[tsi] [pid 0x%x] Consider increasing TSI_WINDOW: offset=%.3fsec\n", ts_st->pid,
         //  (tsi_buffer_head(ts_st)->dts - max_time) / 90000.0);
-    }
-#endif
     { //debug
         MpegTSPesPacket *pkt = tsi_buffer_head(ts_st);
         if (ts_st->tsi.packet_start_time > ts_st->tsi.packet_end_time
