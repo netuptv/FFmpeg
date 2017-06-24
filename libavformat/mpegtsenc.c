@@ -1864,7 +1864,7 @@ static void tsi_remove_empty_packet(AVFormatContext *s, MpegTSWriteStream *ts_st
 static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, int flush)
 {
     MpegTSWrite *ts = s->priv_data;
-    tsi_schedule_services(s, flush);
+    AVStream *st;
 
     { //TODO: LOG_DEBUG? stream time instead of realtime?
         int64_t t = av_gettime_relative();
@@ -1880,12 +1880,11 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
     }
 
-    while (1) {
-        AVStream *st = tsi_get_earliest_stream(s, flush);
-        MpegTSWriteStream *ts_st    = !st ? NULL : st->priv_data;
-        int64_t new_stream_time     = !st ? 0    : ts_st->tsi.service_time + ts_st->service->tsi.time_offset;
-        MpegTSPesPacket* pes_packet = !st ? NULL : tsi_buffer_head(ts_st);
-        if (!st) break;
+    tsi_schedule_services(s, flush);
+    while ((st=tsi_get_earliest_stream(s, flush))) {
+        MpegTSWriteStream *ts_st    = st->priv_data;
+        int64_t new_stream_time     = ts_st->tsi.service_time + ts_st->service->tsi.time_offset;
+        MpegTSPesPacket* pes_packet = tsi_buffer_head(ts_st);
 
         if (duration == AV_NOPTS_VALUE) { // non-realtime
             int64_t max_dts_buffered = 0;
