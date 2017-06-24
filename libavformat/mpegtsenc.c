@@ -1590,8 +1590,10 @@ int64_t tsi_get_adjusted_pcr(AVFormatContext* s, MpegTSWriteStream *ts_st, int f
     }
     if (service->tsi.last_pcr + TSI_PCR_PERIOD - TSI_MAX_PCR_ADJUSTMENT > pcr && !force)
         return AV_NOPTS_VALUE;
-    if (ts->mux_rate <= 1)
+    if (ts->mux_rate <= 1) {
+        service->tsi.last_pcr = pcr;
         return pcr;
+    }
     bytes = avio_tell(s->pb);
     pcr -=  TSI_MAX_PCR_ADJUSTMENT;
     if (service->tsi.last_pcr != AV_NOPTS_VALUE){
