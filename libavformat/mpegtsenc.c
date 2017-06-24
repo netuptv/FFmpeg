@@ -1092,7 +1092,6 @@ static int mpegts_init(AVFormatContext *s)
 
     // FIXME: move? error handling
     {
-        ts->tsi.active = 1; // FIXME: AVOption
         ts->tsi.last_pat = AV_NOPTS_VALUE;
         ts->tsi.last_sdt = AV_NOPTS_VALUE;
         ts->tsi.rate_last_streamtime = AV_NOPTS_VALUE;
@@ -1662,11 +1661,11 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
     MpegTSWrite* ts = s->priv_data;
     MpegTSWriteStream* ts_st = st->priv_data;
 
-    //ts_st->tsi.packet_end_time = ts_st->packets[ts_st->packets_head % (sizeof(ts_st->packets)/sizeof(ts_st->packets[0]))].dts;
+    //ts_st->tsi.packet_end_time = tsi_buffer_head(ts_st)->dts;
     //return;
 #if 0
     int64_t res;
-    int64_t service_time = ts_st->service_time;
+    int64_t service_time = ts_st->tsi.service_time;
     MpegTSPesPacket *end = tsi_buffer_head(ts_st);
     uint64_t first_bytes = end->guessed_paketized_size;
     uint64_t bytes=0;
@@ -1689,7 +1688,7 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         }
         res = min_time;
     }
-    ts_st->packet_end_time = service_time + res;
+    ts_st->tsi.packet_end_time = service_time + res;
     /*
     tsi_log_ts_st(s, ts_st, AV_LOG_WARNING, "tsi_schedule_first_packet: bytes=%7d/%7d dts=%9.3f time=%9.3f - %9.3f, dts_diff=%9.3f\n",
            first_bytes, bytes,
@@ -2767,10 +2766,13 @@ static const AVOption options[] = {
       offsetof(MpegTSWrite, sdt_period), AV_OPT_TYPE_DOUBLE,
       { .dbl = INT_MAX }, 0, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM },
     /* tsi options */
+    { "tsi_active", "Activate tsi mode",
+      offsetof(MpegTSWrite, tsi.active), AV_OPT_TYPE_BOOL,
+      { .i64 = 1}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "tsi_realtime", "Realtime streaming",
       offsetof(MpegTSWrite, tsi.is_realtime), AV_OPT_TYPE_BOOL,
       { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
-    { "tsi_sync_service_times", "Synchronize service times shifting pts/dts/pcr",
+    { "tsi_sync_service_times", "Synchronize MPTS service times by shifting pts/dts/pcr",
       offsetof(MpegTSWrite, tsi.sync_service_times), AV_OPT_TYPE_BOOL,
       { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { NULL },
