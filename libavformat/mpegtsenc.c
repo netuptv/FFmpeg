@@ -2112,6 +2112,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
         last_pkt->payload_size += payload_size;
         last_pkt->guessed_paketized_size = tsi_guess_paketized_size(last_pkt->payload_size);
         ts_st->tsi.buffer_bytes += payload_size;
+        av_buffer_unref(&owned_buf);
         pthread_mutex_unlock(&ts->tsi.mutex);
         return;
     }
