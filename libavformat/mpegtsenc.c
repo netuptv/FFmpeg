@@ -304,7 +304,6 @@ typedef struct MpegTSWriteStream {
         int64_t time;
         int64_t buffer_duration;
         int64_t buffer_bytes;
-        int64_t buffer_packets;
 
         int64_t packet_since;
         int64_t packet_till;
@@ -1738,7 +1737,7 @@ static int tsi_dbg_snprintf_buffers(char* buf, size_t size, AVFormatContext *s, 
         cnt = snprintf(buf + offs, size - FFMIN(size, (size_t)offs),
                         offs == 0 ? "pid#%x %.3fsec/%dKB/%dpkt" : " pid#%x %.3f/%d/%d",
                         ts_st2->pid, ts_st2->tsi.buffer_duration / 90000.0, (int)ts_st2->tsi.buffer_bytes / 1024,
-                        (int)ts_st2->tsi.buffer_packets);
+                        (int)tsi_buffer_size(ts_st2));
         if (cnt < 0)
             return cnt;
         offs += cnt;
@@ -1824,7 +1823,6 @@ static AVStream* tsi_get_earliest_stream(AVFormatContext *s, int flush)
 static void tsi_remove_empty_packet(AVFormatContext *s, MpegTSWriteStream *ts_st, int flush)
 {
     MpegTSPesPacket *old_head = tsi_buffer_head(ts_st);
-    ts_st->tsi.buffer_packets -= 1;
     ts_st->tsi.buffer_bytes -= old_head->payload_size;
     if(old_head->buf)
         av_buffer_unref(&old_head->buf);
@@ -2058,7 +2056,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
 
     last_pkt = tsi_buffer_tail(ts_st);
 
-    if (ts_st->tsi.buffer_packets>0 && dts < last_pkt->dts) {
+    if (tsi_buffer_size(ts_st) > 0 && dts < last_pkt->dts) {
         tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "dropping packet with dts<prev_dts (%ld<%ld) \n",
                dts, last_pkt->dts);
         av_buffer_unref(&owned_buf);
@@ -2076,7 +2074,6 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
                 av_buffer_unref(&pkt->buf);
             else
                 av_freep(&pkt->payload);
-            ts_st->tsi.buffer_packets--;
             ts_st->tsi.buffer_bytes -= pkt->payload_size;
             ts_st->tsi.packets_tail--;
             prev_pkt = tsi_buffer_tail(ts_st);
@@ -2094,7 +2091,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
     //TODO: join first audio packet?
     // join audio pes-packets
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
-            && ts_st->tsi.buffer_packets > 1
+            && tsi_buffer_size(ts_st) > 1
             && last_pkt->dts + TSI_MAX_AUDIO_PACKET_DURATION >= dts) {
         if (last_pkt->buf) {
             //if(last_packet->buf->size>last_packet->payload_size)
@@ -2131,10 +2128,9 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
         .stream_id = stream_id,
     };
 
-    ts_st->tsi.buffer_packets += 1;
     ts_st->tsi.buffer_bytes += payload_size;
 
-    if (ts_st->tsi.buffer_packets>1) {
+    if (tsi_buffer_size(ts_st) > 1) {
         int64_t dts_diff = new_pkt->dts - last_pkt->dts;
         if (dts_diff < TSI_DISCONTINUITY_THRESHOLD) {// TODO: add discontinuity flag?
             ts_st->tsi.buffer_duration += dts_diff;
