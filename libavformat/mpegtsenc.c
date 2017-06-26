@@ -68,18 +68,17 @@ typedef struct MpegTSService {
     AVProgram *program;
 
     struct {
-        int64_t last_pcr;
-        int64_t last_pcr_bytes;
-        int64_t last_pcr_remainder; //TODO: rename
-
+        int64_t time_offset;
         int is_buffered;
         int64_t max_buffer_duration;
         int64_t min_time;
         struct MpegTSWriteStream *min_time_ts_st;
-        int64_t time_offset;
-
-        int64_t last_pcr_adjustment;  // debug
-        int64_t last_packet_realtime; // debug
+        int64_t last_pcr;
+        int64_t last_pcr_bytes;
+        int64_t last_pcr_remainder;
+        //debug
+        int64_t last_pcr_adjustment;
+        int64_t last_packet_realtime;
     } tsi;
 } MpegTSService;
 
@@ -138,13 +137,13 @@ typedef struct MpegTSWrite {
     int omit_video_pes_length;
 
     struct {
+        int64_t ts_time;
         int64_t last_pat_time;
         int64_t last_sdt_time;
-        int64_t rate_last_time;
-        int64_t rate_last_bytes;
-        int64_t ts_time;
-
+        int64_t last_muxrate_time;
+        int64_t last_muxrate_bytes;
         int64_t buffer_report_realtime;
+
         int is_active;
         int is_realtime;
         int sync_service_times;
@@ -1091,7 +1090,7 @@ static int mpegts_init(AVFormatContext *s)
     {
         ts->tsi.last_pat_time = AV_NOPTS_VALUE;
         ts->tsi.last_sdt_time = AV_NOPTS_VALUE;
-        ts->tsi.rate_last_time = AV_NOPTS_VALUE;
+        ts->tsi.last_muxrate_time = AV_NOPTS_VALUE;
         ts->tsi.thread_exit = 0;
         ret = pthread_mutex_init(&ts->tsi.mutex, NULL);
         if (ret != 0) {
@@ -1919,19 +1918,19 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         if (ts->mux_rate > 1) {
             int64_t expected; // TODO: rename
             int64_t bytes = avio_tell(s->pb);
-            if(ts->tsi.rate_last_time == AV_NOPTS_VALUE){
-                ts->tsi.rate_last_time = ts->tsi.ts_time;
-                ts->tsi.rate_last_bytes = bytes;
+            if(ts->tsi.last_muxrate_time == AV_NOPTS_VALUE){
+                ts->tsi.last_muxrate_time = ts->tsi.ts_time;
+                ts->tsi.last_muxrate_bytes = bytes;
             }
             //av_log(s, AV_LOG_WARNING, "[tsi] pid#%03x consumed=%6d time=%.3f\n", ts->ts_stream_time/90000.0,
             //       ts_st->pid, ts_st->packet_consumed_bytes);
-            expected = ts->mux_rate * (ts->tsi.ts_time - ts->tsi.rate_last_time) / (8 * 90000)
-                    - (bytes - ts->tsi.rate_last_bytes);
+            expected = ts->mux_rate * (ts->tsi.ts_time - ts->tsi.last_muxrate_time) / (8 * 90000)
+                    - (bytes - ts->tsi.last_muxrate_bytes);
             if (expected < -188 * 20 ) { // TODO: threshold?
                 tsi_log(s, AV_LOG_WARNING, "bitrate too high, resyncing (%d packets)\n",
                        (int) -expected / 188);
-                ts->tsi.rate_last_time = ts->tsi.ts_time;
-                ts->tsi.rate_last_bytes = bytes;
+                ts->tsi.last_muxrate_time = ts->tsi.ts_time;
+                ts->tsi.last_muxrate_bytes = bytes;
             }
             if (expected > (ts->mux_rate / 8) / 20 ) {
                 tsi_log(s, AV_LOG_WARNING, "[WTF] NULL packet burst (%d packets)\n", (int)expected / 188);
