@@ -142,7 +142,7 @@ typedef struct MpegTSWrite {
         int64_t last_sdt_time;
         int64_t last_muxrate_time;
         int64_t last_muxrate_bytes;
-        int64_t buffer_report_realtime;
+        int64_t buffer_report_realtime; // debug
 
         int is_active;
         int is_realtime;
@@ -303,7 +303,6 @@ typedef struct MpegTSWriteStream {
         int64_t time;
         int64_t buffer_duration;
         int64_t buffer_bytes;
-
         int64_t packet_since;
         int64_t packet_till;
         int packet_consumed_bytes;
@@ -2058,6 +2057,7 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
     if (tsi_buffer_size(ts_st) == tsi_buffer_capacity(ts_st) || ts_st->tsi.buffer_duration > TSI_BUFFER_HIGH) {
         //TODO: check byte size? drop packets in all service streams?
         char buf_before[4096], buf_after[4096];
+        av_buffer_unref(&owned_buf);
         tsi_dbg_snprintf_buffers(buf_before, sizeof(buf_after), s, NULL, ts_st);
         while (tsi_buffer_size(ts_st) > tsi_buffer_capacity(ts_st) / 2 || ts_st->tsi.buffer_duration > TSI_BUFFER_TARGET) {
             MpegTSPesPacket *prev_pkt, *pkt = tsi_buffer_tail(ts_st);
