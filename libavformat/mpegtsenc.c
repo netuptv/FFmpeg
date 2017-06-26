@@ -1685,14 +1685,14 @@ static void tsi_schedule_first_packet(AVFormatContext *s, AVStream *st)
         TSIRational new_max = {bytes, FFMAX(0, duration-TSI_WINDOW)};
         if (tsi_rational_compare(new_min, min_bitrate) > 0) {
             if (tsi_rational_compare(new_min, max_bitrate) > 0) {
-                tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "INTERESTING1\n");
+                //tsi_log_ts_st(s, ts_st, AV_LOG_INFO, "INTERESTING1\n");
                 break;
             }
             min_bitrate = new_min;
         }
         if (tsi_rational_compare(new_max, max_bitrate) < 0) {
             if (tsi_rational_compare(new_max, min_bitrate) < 0) {
-                tsi_log_ts_st(s, ts_st, AV_LOG_ERROR, "INTERESTING2\n");
+                //tsi_log_ts_st(s, ts_st, AV_LOG_INFO, "INTERESTING2\n");
                 break;
             }
             max_bitrate = new_max;
