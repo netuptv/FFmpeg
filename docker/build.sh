@@ -6,6 +6,8 @@ TARGET=ffmpeg
 SCRIPT_DIR=$(cd $(dirname ${0}); pwd)
 SRC_DIR=${SCRIPT_DIR}/..
 REVISION=$(cd ${SRC_DIR}; git rev-parse HEAD)
+[ -z "${BRANCH_NAME}" ] && \
+    BRANCH_NAME=$(cd ${SRC_DIR}; git symbolic-ref --short HEAD)
 if [ "${JENKINS_HOME}" ]; then
     mkdir -p jenkins
     cd jenkins
@@ -28,4 +30,4 @@ docker run --rm \
     ${IMAGE_NAME} \
     /mnt/src/docker/scripts/make.sh $@
 
-printf "%s_revision=%s\n" "${TARGET}" "${REVISION}" > ${OUT_DIR}/build.info
+printf '%s_revision="%s %s %s"\n' "${TARGET}" "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" > ${OUT_DIR}/build.info
