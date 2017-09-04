@@ -1,0 +1,5 @@
+job_name: "FFmpeg muxer2"
+artifacts: "ffmpeg"
+emails:
+    - kvi@netup.ru
+script: "./docker/build.sh"
