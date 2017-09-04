@@ -7,11 +7,7 @@ SCRIPT_DIR=$(cd $(dirname ${0}); pwd)
 SRC_DIR=${SCRIPT_DIR}/..
 REVISION=$(cd ${SRC_DIR}; git rev-parse HEAD)
 [ -z "${BRANCH_NAME}" ] && \
-    BRANCH_NAME=$(cd ${SRC_DIR}; git symbolic-ref --short HEAD)
-if [ "${JENKINS_HOME}" ]; then
-    mkdir -p jenkins
-    cd jenkins
-fi
+    BRANCH_NAME=$(cd ${SRC_DIR}; git symbolic-ref -q --short HEAD || echo 'unknown')
 OUT_DIR=$(pwd)/out/${TARGET}
 BUILD_DIR=$(pwd)/build/${TARGET}
 CCACHE_DIR=$(pwd)/ccache/${TARGET}

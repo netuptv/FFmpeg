@@ -1,5 +1,10 @@
 job_name: "FFmpeg muxer2"
 out_dir: "ffmpeg"
+parameters:
+    shared:
+        type: "boolean"
+        default_value: false
+        description: "Build FFmpeg as shared libraries"
 emails:
     - kvi@netup.ru
 script: "./docker/build.sh"
