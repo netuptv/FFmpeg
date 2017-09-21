@@ -12,7 +12,7 @@ import org.jenkinsci.plugins.workflow.support.steps.build.RunWrapper
 
 /**
  *  Unified Jenkinsfile for multibranch builds
- *  Vertion: 0.1
+ *  Version: 0.1.5
  */
 
 
@@ -264,6 +264,18 @@ def makeCopyParameters(parameters)
     return copy_parameters.join(',')
 }
 
+def getConfigfileName()
+{
+    def job_main_name = env.JOB_NAME.take(env.JOB_NAME.length() - env.JOB_BASE_NAME.length() - 1)
+    def last_index = job_main_name.lastIndexOf('-')
+    if (last_index >= 1 && last_index < (job_main_name.length() - 1)) {
+        def configfile_name = 'Jenkinsconfig.' + job_main_name.substring(last_index + 1)
+        if (fileExists(configfile_name))
+            return configfile_name
+    }
+    return 'Jenkinsconfig'
+}
+
 
 /**
  *  Step functions
@@ -273,16 +285,11 @@ def loadConfig()
 {
     // Checkout repository and load config
     def config = [:]
-    def configfile
-    if (env.JOB_NAME.endsWith('-test/' + env.JOB_BASE_NAME))
-        configfile = 'Jenkinsconfig.test'
-    else
-        configfile = 'Jenkinsconfig'
 
     node ("master") {
         stage ("Checkout on master and load config") {
             checkout scm
-            config = readYaml file: configfile
+            config = readYaml file: getConfigfileName()
         }
     }
     return config
@@ -293,8 +300,8 @@ def configureBuild(config)
     stage ('Configure job and build names, job properties') {
         // Short branch name
         def branch_short
-        if (config['branch_name_prefix'] && env.BRANCH_NAME.startsWith(config['branch_name_prefix'])) {
-            branch_short = env.BRANCH_NAME.substring(config['branch_name_prefix'].length())
+        if (config['branch_prefix'] && env.BRANCH_NAME.startsWith(config['branch_prefix'])) {
+            branch_short = env.BRANCH_NAME.substring(config['branch_prefix'].length())
         }
         else {
             branch_short = env.BRANCH_NAME
@@ -474,7 +481,8 @@ def hasChanges(config, artifact_list)
                     def job_options = artifact_list[job_name]
                     def artifact_build_info = readProperties file: 'jenkins/out/' + job_options['build_info']
                     for (prop in artifact_build_info.keySet()) {
-                        if (artifact_build_info[prop] != prev_build_info[config['build_info_prefix'] + '_' + prop]) {
+                        def prev_value = prev_build_info[config['build_info_prefix'] + '_' + prop]
+                        if (prev_value && artifact_build_info[prop] != prev_value) {
                             println "Found change in job ${job_name}"
                             return true
                         }
@@ -483,6 +491,10 @@ def hasChanges(config, artifact_list)
             }
             println 'No changes found, abort build'
             currentBuild.result = 'ABORTED'
+            node () {
+                def archive_dir = currentBuild.rawBuild.pickArtifactManager().root().toURI().path
+                sh "ln -s ../${build_num}/archive ${archive_dir}"
+            }
             return false
         }
         return true
