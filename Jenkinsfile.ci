@@ -43,3 +43,6 @@ node() {
         sendToIndividuals: false
     ])
 }
+
+if (currentBuild.result == 'SUCCESS')
+    build job:'ffobjectmodel-ci/master', wait:false
