@@ -1917,6 +1917,8 @@ typedef struct AVFormatContext {
      * - decoding: set by user
      */
     int max_streams;
+
+    int discard_corrupt_media_type_mask;
 } AVFormatContext;
 
 /**

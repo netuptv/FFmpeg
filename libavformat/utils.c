@@ -35,6 +35,7 @@
 #include "libavutil/time.h"
 #include "libavutil/time_internal.h"
 #include "libavutil/timestamp.h"
+#include "libavutil/avutil.h"
 
 #include "libavcodec/bytestream.h"
 #include "libavcodec/internal.h"
@@ -788,6 +789,19 @@ static int update_wrap_reference(AVFormatContext *s, AVStream *st, int stream_in
     return 1;
 }
 
+static enum AVMediaType get_media_type(const AVFormatContext *s, const AVPacket *pkt)
+{
+    if (pkt->stream_index >= (unsigned)s->nb_streams)
+	return AVMEDIA_TYPE_UNKNOWN;
+    return s->streams[pkt->stream_index]->codecpar->codec_type;
+}
+
+static const char *get_media_type_str(enum AVMediaType type)
+{
+    const char *str = av_get_media_type_string(type);
+    return str ? str : "unknown";
+}
+
 int ff_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     int ret, i, err;
@@ -840,14 +854,16 @@ int ff_read_packet(AVFormatContext *s, AVPacket *pkt)
             *pkt = tmp;
         }
 
-        if ((s->flags & AVFMT_FLAG_DISCARD_CORRUPT) &&
-            (pkt->flags & AV_PKT_FLAG_CORRUPT)) {
-            av_log(s, AV_LOG_WARNING,
-                   "Dropped corrupted packet (stream = %d)\n",
-                   pkt->stream_index);
-            av_packet_unref(pkt);
-            continue;
-        }
+	if (pkt -> flags & AV_PKT_FLAG_CORRUPT) {
+	    enum AVMediaType media_type = get_media_type(s, pkt);
+	    if ((s->flags & AVFMT_FLAG_DISCARD_CORRUPT) && ((1 << media_type) & s->discard_corrupt_media_type_mask)) {
+		av_log(s, AV_LOG_WARNING,
+		    "Dropped corrupted packet (stream = %d, type = %s)\n",
+		    pkt->stream_index, get_media_type_str(media_type));
+		av_packet_unref(pkt);
+		continue;
+	    }
+	}
 
         if (pkt->stream_index >= (unsigned)s->nb_streams) {
             av_log(s, AV_LOG_ERROR, "Invalid stream index %d\n", pkt->stream_index);
