@@ -792,7 +792,7 @@ static int update_wrap_reference(AVFormatContext *s, AVStream *st, int stream_in
 static enum AVMediaType get_media_type(const AVFormatContext *s, const AVPacket *pkt)
 {
     if (pkt->stream_index >= (unsigned)s->nb_streams)
-        return AVMEDIA_TYPE_UNKNOWN;
+	return AVMEDIA_TYPE_UNKNOWN;
     return s->streams[pkt->stream_index]->codecpar->codec_type;
 }
 
@@ -854,16 +854,16 @@ int ff_read_packet(AVFormatContext *s, AVPacket *pkt)
             *pkt = tmp;
         }
 
-        if (pkt -> flags & AV_PKT_FLAG_CORRUPT) {
-            enum AVMediaType media_type = get_media_type(s, pkt);
-            if ((s->flags & AVFMT_FLAG_DISCARD_CORRUPT) && ((1 << media_type) & s->discard_corrupt_media_type_mask)) {
-                av_log(s, AV_LOG_WARNING,
-                    "Dropped corrupted packet (stream = %d, type = %s)\n",
-                    pkt->stream_index, get_media_type_str(media_type));
-                av_packet_unref(pkt);
-                continue;
-            }
-        }
+	if (pkt -> flags & AV_PKT_FLAG_CORRUPT) {
+	    enum AVMediaType media_type = get_media_type(s, pkt);
+	    if ((s->flags & AVFMT_FLAG_DISCARD_CORRUPT) && ((1 << media_type) & s->discard_corrupt_media_type_mask)) {
+		av_log(s, AV_LOG_WARNING,
+		    "Dropped corrupted packet (stream = %d, type = %s)\n",
+		    pkt->stream_index, get_media_type_str(media_type));
+		av_packet_unref(pkt);
+		continue;
+	    }
+	}
 
         if (pkt->stream_index >= (unsigned)s->nb_streams) {
             av_log(s, AV_LOG_ERROR, "Invalid stream index %d\n", pkt->stream_index);
