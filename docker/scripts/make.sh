@@ -13,7 +13,7 @@ cd ${BUILD_DIR}
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-OPTS=$( getopt -o '' --long "shared" --long "debug" -n "$( basename ${0} )" -- "$@" )
+OPTS=$( getopt -o '' --long "shared,debug" -n "$( basename ${0} )" -- "$@" )
 eval set -- "${OPTS}"
 
 SHARED=
