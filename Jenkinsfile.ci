@@ -4,7 +4,7 @@ catchError {
             disableConcurrentBuilds(),
             parameters([
                 booleanParam(description: 'Wipe out workspace before build', name: 'wipe')]),
-            pipelineTriggers([pollSCM('* * * * *')])
+            pipelineTriggers([pollSCM('H/5 * * * *')])
         ])
     }
 
