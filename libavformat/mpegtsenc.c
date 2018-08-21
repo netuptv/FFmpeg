@@ -2567,7 +2567,7 @@ static void mpegts_write_flush(AVFormatContext *s)
         }
     }
 
-    if (!((MpegTSWrite*)s->priv_data)->tsi.is_realtime)
+    if (((MpegTSWrite*)s->priv_data)->tsi.is_active && !((MpegTSWrite*)s->priv_data)->tsi.is_realtime)
         tsi_drain_interleaving_buffer(s, AV_NOPTS_VALUE, 1);
 }
 
@@ -2735,7 +2735,7 @@ static const AVOption options[] = {
     /* tsi options */
     { "tsi_active", "Activate tsi mode",
       offsetof(MpegTSWrite, tsi.is_active), AV_OPT_TYPE_BOOL,
-      { .i64 = 1}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
+      { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
     { "tsi_realtime", "Realtime streaming",
       offsetof(MpegTSWrite, tsi.is_realtime), AV_OPT_TYPE_BOOL,
       { .i64 = 0}, 0, 1, AV_OPT_FLAG_ENCODING_PARAM },
