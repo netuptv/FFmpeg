@@ -34,5 +34,12 @@ while true; do
     shift
 done
 
-${SRC_DIR}/configure --prefix=${OUT_DIR} --enable-pic --enable-libmp3lame --disable-vaapi ${SHARED} ${DEBUG}
+${SRC_DIR}/configure \
+    --prefix=${OUT_DIR} \
+    --enable-pic \
+    --enable-libmp3lame \
+    --disable-vaapi \
+    --enable-openssl \
+    ${SHARED} \
+    ${DEBUG}
 make -j $(nproc) install-libs install-headers
