@@ -22,7 +22,7 @@ catchError {
 
         stage('Build') {
             dir('jenkins') {
-                sh "../docker/build.sh_ssl1.1.sh --shared"
+                sh "../docker/build_ssl1.1.sh --shared"
             }
         }
 
