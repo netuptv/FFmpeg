@@ -22,7 +22,7 @@ catchError {
 
         stage('Build') {
             dir('jenkins') {
-                sh "../docker/build.sh --shared"
+                sh "../docker/build.sh_ssl1.1.sh --shared"
             }
         }
 
@@ -45,4 +45,4 @@ node() {
 }
 
 if (currentBuild.currentResult == 'SUCCESS')
-    build job:'ffobjectmodel-ci/master', wait:false
+    build job:'multibranch2-folder/dvb/master', wait:false
