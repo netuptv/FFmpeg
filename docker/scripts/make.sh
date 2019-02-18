@@ -40,6 +40,9 @@ ${SRC_DIR}/configure \
     --enable-libmp3lame \
     --disable-vaapi \
     --enable-openssl \
+    --disable-programs \
+    --enable-ffprobe \
+    --disable-doc \
     ${SHARED} \
     ${DEBUG}
-make -j $(nproc) install-libs install-headers
+make -j $(nproc) install-libs install-headers install-progs

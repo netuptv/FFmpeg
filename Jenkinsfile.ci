@@ -28,7 +28,7 @@ catchError {
 
         stage('Save artifacts') {
             dir ('jenkins/out/ffmpeg') {
-                sh 'tar czf artifacts.tgz include lib'
+                sh 'tar czf artifacts.tgz bin include lib'
             }
             archiveArtifacts 'jenkins/out/ffmpeg/artifacts.tgz,jenkins/out/ffmpeg/build.info'
         }
