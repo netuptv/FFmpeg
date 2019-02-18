@@ -45,4 +45,4 @@ node() {
 }
 
 if (currentBuild.currentResult == 'SUCCESS')
-    build job:'multibranch2-folder/dvb/master', wait:false
+    build job:'multibranch2-folder/multimedia/master', wait:false
