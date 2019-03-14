@@ -151,7 +151,7 @@ typedef struct MpegTSWrite {
         pthread_t thread;
         pthread_mutex_t mutex;
         pthread_cond_t cond;
-        int thread_exit;
+        volatile int thread_exit;
 #endif
     } tsi;
 } MpegTSWrite;
@@ -1108,7 +1108,7 @@ static AVStream* tsi_get_earliest_stream(AVFormatContext *s, int flush)
     return st;
 }
 
-static void tsi_remove_empty_packet(AVFormatContext *s, MpegTSWriteStream *ts_st)
+static void tsi_remove_finished_packet(AVFormatContext *s, MpegTSWriteStream *ts_st)
 {
     MpegTSPesPacket *old_head = tsi_buffer_head(ts_st);
     ts_st->tsi.last_packet_key = old_head->key;
@@ -1206,7 +1206,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         if (ts->mux_rate > 1) {
             int64_t expected; // TODO: rename
             int64_t bytes = avio_tell(s->pb);
-            if(ts->tsi.last_muxrate_time == AV_NOPTS_VALUE){
+            if(ts->tsi.last_muxrate_time == AV_NOPTS_VALUE) {
                 ts->tsi.last_muxrate_time = ts->tsi.ts_time;
                 ts->tsi.last_muxrate_bytes = bytes;
             }
@@ -1221,7 +1221,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
                 ts->tsi.last_muxrate_bytes = bytes;
             }
             if (expected > (ts->mux_rate / 8) / 20 ) {
-                tsi_log(s, AV_LOG_WARNING, "[WTF] NULL packet burst (%d packets)\n", (int)expected / 188);
+                tsi_log(s, AV_LOG_WARNING, "NULL packet burst (%d packets)\n", (int)expected / 188);
             }
             while (expected > 188) {
                 mpegts_insert_null_packet(s);
@@ -1258,7 +1258,7 @@ static void tsi_drain_interleaving_buffer(AVFormatContext *s, int64_t duration, 
         }
 
         if (ts_st->tsi.packet_consumed_bytes == pkt->payload_size) {
-            tsi_remove_empty_packet(s, ts_st);
+            tsi_remove_finished_packet(s, ts_st);
             tsi_schedule_services(s, flush);
         }
     }
@@ -1276,7 +1276,7 @@ static int tsi_interleave_packet(AVFormatContext *s, AVPacket *out, AVPacket *in
 
 static void* tsi_thread(void *opaque)
 {
-    //int64_t dbg=0;
+    //int64_t oops=0;
     AVFormatContext *s = opaque;
     MpegTSWrite *ts = s->priv_data;
     int64_t t_prev = av_gettime_relative() * 9/*0000*/ / 100/*0000*/;
@@ -1284,17 +1284,16 @@ static void* tsi_thread(void *opaque)
         int64_t t = av_gettime_relative() * 9/*0000*/ / 100/*0000*/;
         int64_t duration = t - t_prev;
         if (duration > 90000 / 10) {
-            tsi_log(s, AV_LOG_WARNING, "tsi_thread: duration too large %.3f sec\n", duration / 90000.0);
+            tsi_log(s, AV_LOG_WARNING, "tsi_thread: duration too large %.3f sec (usually this means swapping or network problems)\n", duration / 90000.0);
             duration = 90000 / 10;
         }
         pthread_mutex_lock(&ts->tsi.mutex);
         tsi_drain_interleaving_buffer(s, duration, 0);
-        //tsi_drain_interleaving_buffer(s, AV_NOPTS_VALUE, 0);
         pthread_mutex_unlock(&ts->tsi.mutex);
 
         av_usleep(10000); //TODO: AVOption?
         t_prev = t;
-        /*if( (++dbg)%(100*40) == 0 ) {
+        /*if( (++oops)%(100*40) == 0 ) {
             av_usleep(4*1000*1000); // oops!
         }*/
     }
@@ -1309,8 +1308,8 @@ static void tsi_mpegts_write_pes(AVFormatContext *s, AVStream *st,
     MpegTSWriteStream *ts_st = st->priv_data;
     MpegTSPesPacket *last_pkt, *new_pkt;
 
-    if (owned_buf && owned_buf->data != payload) //TODO: remove debug
-        tsi_log(s, AV_LOG_INFO, "strange packet offs=%d size=%d/%d\n", (int)(payload - owned_buf->data), payload_size, owned_buf->size);
+    //if (owned_buf && owned_buf->data != payload) //TODO: remove debug
+    //    tsi_log(s, AV_LOG_INFO, "strange packet offs=%d size=%d/%d\n", (int)(payload - owned_buf->data), payload_size, owned_buf->size);
 
     { //TODO: remove debug
         int64_t t = av_gettime_relative();
@@ -2176,7 +2175,6 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     ts_st->prev_payload_key = key;
 }
 
-
 int ff_check_h264_startcode(AVFormatContext *s, const AVStream *st, const AVPacket *pkt)
 {
     if (pkt->size < 5 || AV_RB32(pkt->data) != 0x0000001 && AV_RB24(pkt->data) != 0x000001) {
@@ -2482,10 +2480,10 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
     }
 
     if (ts->tsi.is_active) {
-        AVBufferRef *tmp=NULL;
+        AVBufferRef *tmp = NULL;
         if (data) {
             tmp = av_buffer_create(data, size, av_buffer_default_free, NULL, 0);
-        } else if (pkt->buf){
+        } else if (pkt->buf) {
             tmp = av_buffer_ref(pkt->buf);
         } else {
             av_buffer_realloc(&tmp, size);
@@ -2494,7 +2492,8 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
         }
         tsi_mpegts_write_pes(s, st, buf, size, pts, dts,
                          pkt->flags & AV_PKT_FLAG_KEY, stream_id, tmp);
-        if (!tmp) av_free(data);
+        if (!tmp)
+            av_free(data);
         return 0;
     }
 
