@@ -1921,7 +1921,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         force_pat = 1;
     }
 
-    if (tsi_active && is_dvb_subtitle) payload_size++;
+    if (is_dvb_subtitle) payload_size++;
 
     while (payload_size > 0) {
         if (!tsi_active) { // keep ffmpeg indention in this block
@@ -2070,7 +2070,8 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             len = payload_size + header_len + 3;
             /* 3 extra bytes should be added to DVB subtitle payload: 0x20 0x00 at the beginning and trailing 0xff */
             if (is_dvb_subtitle) {
-                len += 3;
+                //FIXME: handle case when last ts packet contains single trailing 0xFF (tsi.packet_consumed_bytes)
+                len += 2; // third byte added in "if (is_dvb_subtitle) payload_size++;"
             }
             if (len > 0xffff)
                 len = 0;
