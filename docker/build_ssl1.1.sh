@@ -7,7 +7,6 @@ SRC_DIR="${SCRIPT_DIR}/.."
 OUT_DIR="$(pwd)/out/ffmpeg"
 BUILD_DIR="$(pwd)/build/ffmpeg"
 CCACHE_DIR="$(pwd)/ccache/ffmpeg"
-BUILD_PACKAGE_DIR="${BUILD_DIR}/package"
 REVISION="$(cd ${SRC_DIR}; git rev-parse HEAD)"
 [ -z "${BRANCH_NAME}" ] && \
     BRANCH_NAME=$(cd ${SRC_DIR}; git symbolic-ref -q --short HEAD || echo 'unknown')
@@ -26,7 +25,8 @@ FROM debian:${IMAGE_TAG}
 RUN echo 'deb ${SNAPSHOT_URL} stretch main' > /etc/apt/sources.list && \
     apt-get update && \
     apt-get install --no-install-recommends --assume-yes \
-        gcc make libssl-dev libc6-dev yasm libmp3lame-dev pkg-config && \
+        gcc make libssl-dev libc6-dev yasm libmp3lame-dev pkg-config \
+        libzvbi-dev && \
     apt-get install --no-install-recommends --assume-yes ccache && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

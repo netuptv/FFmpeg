@@ -2,19 +2,36 @@
 
 set -e
 
-TARGET=ffmpeg
-SCRIPT_DIR=$(cd $(dirname ${0}); pwd)
-SRC_DIR=${SCRIPT_DIR}/..
-REVISION=$(cd ${SRC_DIR}; git rev-parse HEAD)
+SCRIPT_DIR="$(realpath "$(dirname "${0}")")"
+SRC_DIR="${SCRIPT_DIR}/.."
+OUT_DIR="$(pwd)/out/ffmpeg"
+BUILD_DIR="$(pwd)/build/ffmpeg"
+CCACHE_DIR="$(pwd)/ccache/ffmpeg"
+REVISION="$(cd ${SRC_DIR}; git rev-parse HEAD)"
 [ -z "${BRANCH_NAME}" ] && \
     BRANCH_NAME=$(cd ${SRC_DIR}; git symbolic-ref -q --short HEAD || echo 'unknown')
-OUT_DIR=$(pwd)/out/${TARGET}
-BUILD_DIR=$(pwd)/build/${TARGET}
-CCACHE_DIR=$(pwd)/ccache/${TARGET}
-IMAGE_TAG=$(head -n 1 ${SCRIPT_DIR}/build.tag)
-IMAGE_NAME=build.netup:5000/iptv_2.0_build:${IMAGE_TAG}
+if [ -z "${BUILD_NUMBER}" ]; then
+    BUILD_NUMBER="$( date --utc '+%Y%m%dT%H%M' )-$( id -un )"
+fi
+TAG="$( sed 's#/#_#g' <<<"${BRANCH_NAME}" ).${BUILD_NUMBER}"
 
-mkdir -p ${OUT_DIR} ${CCACHE_DIR} ${BUILD_DIR}
+mkdir -p "${OUT_DIR}" "${CCACHE_DIR}" "${BUILD_DIR}"
+
+. "${SCRIPT_DIR}/image/image.env"
+SNAPSHOT_URL="http://snapshot.debian.org/archive/debian/${SNAPSHOT}"
+docker build --force-rm --iidfile "${BUILD_DIR}/image.id" - <<EOF
+FROM debian:${IMAGE_TAG}
+
+RUN echo 'deb ${SNAPSHOT_URL} stretch main' > /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install --no-install-recommends --assume-yes \
+        gcc make libssl1.0-dev libc6-dev yasm libmp3lame-dev pkg-config \
+        libzvbi-dev && \
+    apt-get install --no-install-recommends --assume-yes ccache && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+EOF
+IMAGE_ID="$( head -n1 "${BUILD_DIR}/image.id" )"
 
 docker run --rm \
     --volume ${SRC_DIR}:/mnt/src:ro \
@@ -22,8 +39,8 @@ docker run --rm \
     --volume ${BUILD_DIR}:/mnt/build \
     --volume ${CCACHE_DIR}:/mnt/ccache \
     --user ${UID} \
-    -t \
-    ${IMAGE_NAME} \
+    --tty \
+    ${IMAGE_ID} \
     /mnt/src/docker/scripts/make.sh $@
 
 printf '%s_revision="%s %s %s"\n' "${TARGET}" "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" > ${OUT_DIR}/build.info

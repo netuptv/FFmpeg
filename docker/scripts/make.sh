@@ -43,6 +43,7 @@ ${SRC_DIR}/configure \
     --disable-programs \
     --enable-ffprobe \
     --disable-doc \
+    --enable-libzvbi \
     ${SHARED} \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
