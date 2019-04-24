@@ -43,4 +43,4 @@ docker run --rm \
     ${IMAGE_ID} \
     /mnt/src/docker/scripts/make.sh $@
 
-printf '%s_revision="%s %s %s"\n' "${TARGET}" "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" > ${OUT_DIR}/build.info
+printf 'ffmpeg_revision="%s %s %s"\n' "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" > ${OUT_DIR}/build.info
