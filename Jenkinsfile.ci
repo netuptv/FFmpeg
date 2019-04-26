@@ -43,6 +43,3 @@ node() {
         sendToIndividuals: false
     ])
 }
-
-if (currentBuild.currentResult == 'SUCCESS')
-    build job:'multibranch2-folder/multimedia/master', wait:false
