@@ -4,8 +4,8 @@ set -e
 
 SCRIPT_DIR="$(realpath "$(dirname "${0}")")"
 SRC_DIR="${SCRIPT_DIR}/.."
-OUT_DIR="$(pwd)/out/ffmpeg"
-BUILD_DIR="$(pwd)/build/ffmpeg"
+OUT_DIR="$(pwd)/out/ffmpeg_ssl1.1"
+BUILD_DIR="$(pwd)/build/ffmpeg_ssl1.1"
 CCACHE_DIR="$(pwd)/ccache/ffmpeg"
 REVISION="$(cd ${SRC_DIR}; git rev-parse HEAD)"
 [ -z "${BRANCH_NAME}" ] && \
