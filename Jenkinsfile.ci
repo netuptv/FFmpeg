@@ -23,7 +23,6 @@ catchError {
         stage('Build') {
             dir('jenkins') {
                 sh "../docker/build.sh --shared"
-                sh "../docker/build_ssl1.1.sh --shared"
             }
         }
 
@@ -37,8 +36,6 @@ catchError {
             archiveArtifacts([
                 'jenkins/out/ffmpeg/artifacts.tgz',
                 'jenkins/out/ffmpeg/build.info',
-                'jenkins/out/ffmpeg_ssl1.1/artifacts.tgz',
-                'jenkins/out/ffmpeg_ssl1.1/build.info'].join(','))
         }
     }
 }
