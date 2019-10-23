@@ -17,13 +17,10 @@ TAG="$( sed 's#/#_#g' <<<"${BRANCH_NAME}" ).${BUILD_NUMBER}"
 
 mkdir -p "${OUT_DIR}" "${CCACHE_DIR}" "${BUILD_DIR}"
 
-. "${SCRIPT_DIR}/image/image.env"
-SNAPSHOT_URL="http://snapshot.debian.org/archive/debian/${SNAPSHOT}"
 docker build --force-rm --iidfile "${BUILD_DIR}/image.id" - <<EOF
-FROM debian:${IMAGE_TAG}
+FROM debian:buster-slim
 
-RUN echo 'deb ${SNAPSHOT_URL} stretch main' > /etc/apt/sources.list && \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install --no-install-recommends --assume-yes \
         gcc make libssl-dev libc6-dev yasm libmp3lame-dev pkg-config \
         libzvbi-dev && \
