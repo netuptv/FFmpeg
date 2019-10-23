@@ -22,15 +22,12 @@ catchError {
 
         stage('Build') {
             dir('jenkins') {
-                sh "../docker/build.sh --shared"
+                sh "../docker/build.sh"
             }
         }
 
         stage('Save artifacts') {
             dir('jenkins/out/ffmpeg') {
-                sh 'tar czf artifacts.tgz bin include lib'
-            }
-            dir('jenkins/out/ffmpeg_ssl1.1') {
                 sh 'tar czf artifacts.tgz bin include lib'
             }
             archiveArtifacts([

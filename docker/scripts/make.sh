@@ -13,7 +13,7 @@ cd ${BUILD_DIR}
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-OPTS=$( getopt -o '' --long "shared,debug" -n "$( basename ${0} )" -- "$@" )
+OPTS=$( getopt -o '' --long "debug" -n "$( basename ${0} )" -- "$@" )
 eval set -- "${OPTS}"
 
 SHARED=
@@ -23,9 +23,6 @@ while true; do
     case "${1}" in
         --debug)
             DEBUG="--enable-debug=3 --disable-optimizations --disable-stripping"
-            ;;
-        --shared)
-            SHARED=--enable-shared
             ;;
         --)
             shift
@@ -44,6 +41,6 @@ ${SRC_DIR}/configure \
     --enable-ffprobe \
     --disable-doc \
     --enable-libzvbi \
-    ${SHARED} \
+    --enable-shared
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
