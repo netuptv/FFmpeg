@@ -16,7 +16,6 @@ export CCACHE_DIR
 OPTS=$( getopt -o '' --long "debug" -n "$( basename ${0} )" -- "$@" )
 eval set -- "${OPTS}"
 
-SHARED=
 DEBUG=
 
 while true; do
