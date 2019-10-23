@@ -32,7 +32,7 @@ catchError {
             }
             archiveArtifacts([
                 'jenkins/out/ffmpeg/artifacts.tgz',
-                'jenkins/out/ffmpeg/build.info',
+                'jenkins/out/ffmpeg/build.info'].join(','))
         }
     }
 }
