@@ -1910,6 +1910,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     uint8_t *q;
     int val, len, header_len, write_pcr = 0;
     const int is_dvb_subtitle = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE);
+    const int is_dvb_teletext = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_TELETEXT);
     const int tsi_active = ts->tsi.is_active;
     int is_start = !tsi_active || ts_st->tsi.packet_consumed_bytes == 0;
     int64_t pcr = -1; /* avoid warning */
@@ -1966,7 +1967,8 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             q = get_ts_payload_start(buf);
             ts_st->discontinuity = 0;
         }
-        if (key && is_start && pts != AV_NOPTS_VALUE) {
+        if (key && is_start && pts != AV_NOPTS_VALUE
+            && !is_dvb_teletext /* adaptation+payload forbidden for teletext (ETSI EN 300 472 V1.3.1 4.1) */ ) {
             // set Random Access for key frames
             if (ts_st->pid == ts_st->service->pcr_pid)
                 write_pcr = 1;
