@@ -574,6 +574,8 @@ static int invert_initial_buffer(ResampleContext *c, AudioData *dst, const Audio
     // copy
     for (n = *out_sz; n < num; n++) {
         for (ch = 0; ch < src->ch_count; ch++) {
+            if (!src->ch[ch])
+                return AVERROR(EINVAL);
             memcpy(dst->ch[ch] + ((c->filter_length + n) * c->felem_size),
                    src->ch[ch] + ((n - *out_sz) * c->felem_size), c->felem_size);
         }
