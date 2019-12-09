@@ -40,6 +40,6 @@ ${SRC_DIR}/configure \
     --enable-ffprobe \
     --disable-doc \
     --enable-libzvbi \
-    --enable-shared
+    --enable-shared \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
