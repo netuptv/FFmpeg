@@ -13,13 +13,17 @@ cd ${BUILD_DIR}
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-OPTS=$( getopt -o '' --long "debug" -n "$( basename ${0} )" -- "$@" )
+OPTS=$( getopt -o '' --long "x264" --long "debug" -n "$( basename ${0} )" -- "$@" )
 eval set -- "${OPTS}"
 
+X264=
 DEBUG=
 
 while true; do
     case "${1}" in
+        --x264)
+            X264="--disable-nvenc --enable-libx264 --enable-gpl --enable-nonfree"
+            ;;
         --debug)
             DEBUG="--enable-debug=3 --disable-optimizations --disable-stripping"
             ;;
@@ -41,5 +45,6 @@ ${SRC_DIR}/configure \
     --disable-doc \
     --enable-libzvbi \
     --enable-shared \
+    ${X264} \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
