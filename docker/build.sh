@@ -4,8 +4,8 @@ set -e
 
 SCRIPT_DIR="$(realpath "$(dirname "${0}")")"
 SRC_DIR="${SCRIPT_DIR}/.."
-OUT_DIR="$(pwd)/out/ffmpeg"
-BUILD_DIR="$(pwd)/build/ffmpeg"
+OUT_DIR="$(pwd)/out"
+BUILD_DIR="$(pwd)/build"
 CCACHE_DIR="$(pwd)/ccache/ffmpeg"
 REVISION="$(cd ${SRC_DIR}; git rev-parse HEAD)"
 [ -z "${BRANCH_NAME}" ] && \
@@ -32,7 +32,7 @@ IMAGE_ID="$( head -n1 "${BUILD_DIR}/image.id" )"
 
 docker run --rm \
     --volume ${SRC_DIR}:/mnt/src:ro \
-    --volume ${OUT_DIR}:/opt/ffmpeg \
+    --volume ${OUT_DIR}:/opt \
     --volume ${BUILD_DIR}:/mnt/build \
     --volume ${CCACHE_DIR}:/mnt/ccache \
     --user ${UID} \
@@ -40,4 +40,5 @@ docker run --rm \
     ${IMAGE_ID} \
     /mnt/src/docker/scripts/make.sh $@
 
-printf 'ffmpeg_revision="%s %s %s"\n' "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" > ${OUT_DIR}/build.info
+printf 'ffmpeg_revision="%s %s %s"\n' "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" >${OUT_DIR}/ffmpeg/build.info
+printf 'ffmpeg_x264_revision="%s %s %s"\n' "${REVISION}" "${BRANCH_NAME}" "${BUILD_URL}" >${OUT_DIR}/ffmpeg_x264/build.info

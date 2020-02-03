@@ -5,25 +5,23 @@ set -e
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 SRC_DIR=$(cd ${SCRIPT_DIR}/../..; pwd)
 OUT_DIR=/opt/ffmpeg
-BUILD_DIR=/mnt/build
+OUT_X264_DIR=/opt/ffmpeg_x264
+BUILD_DIR=/mnt/build/ffmpeg
+BUILD_X264_DIR=/mnt/build/ffmpeg_x264
 CCACHE_DIR=/mnt/ccache
-
-cd ${BUILD_DIR}
 
 export PATH=/usr/lib/ccache/:${PATH}
 export CCACHE_DIR
 
-OPTS=$( getopt -o '' --long "x264" --long "debug" -n "$( basename ${0} )" -- "$@" )
+mkdir -p "${BUILD_DIR}" "${BUILD_X264_DIR}" "${OUT_DIR}" "${BUILD_X264_DIR}"
+
+OPTS=$( getopt -o '' --long "debug" -n "$( basename ${0} )" -- "$@" )
 eval set -- "${OPTS}"
 
-X264=
 DEBUG=
 
 while true; do
     case "${1}" in
-        --x264)
-            X264="--disable-nvenc --enable-libx264 --enable-gpl --enable-nonfree"
-            ;;
         --debug)
             DEBUG="--enable-debug=3 --disable-optimizations --disable-stripping"
             ;;
@@ -34,6 +32,7 @@ while true; do
     shift
 done
 
+cd ${BUILD_DIR}
 ${SRC_DIR}/configure \
     --prefix=${OUT_DIR} \
     --enable-pic \
@@ -45,6 +44,24 @@ ${SRC_DIR}/configure \
     --disable-doc \
     --enable-libzvbi \
     --enable-shared \
-    ${X264} \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
+
+cd ${BUILD_X264_DIR}
+${SRC_DIR}/configure \
+    --prefix=${OUT_X264_DIR} \
+    --enable-pic \
+    --enable-libmp3lame \
+    --disable-vaapi \
+    --enable-openssl \
+    --disable-programs \
+    --enable-ffprobe \
+    --disable-doc \
+    --enable-libzvbi \
+    --enable-shared \
+    --disable-nvenc \
+    --enable-libx264 \
+    --enable-gpl \
+    --enable-nonfree \
+    ${DEBUG}
+make -j $(nproc) install-libs install-headers
