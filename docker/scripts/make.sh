@@ -53,7 +53,6 @@ ${SRC_DIR}/configure \
     --enable-pic \
     --enable-libmp3lame \
     --disable-vaapi \
-    --enable-openssl \
     --disable-programs \
     --enable-ffprobe \
     --disable-doc \
@@ -62,6 +61,5 @@ ${SRC_DIR}/configure \
     --disable-nvenc \
     --enable-libx264 \
     --enable-gpl \
-    --enable-nonfree \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers
