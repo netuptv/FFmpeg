@@ -1075,7 +1075,9 @@ static void tsi_schedule_services(AVFormatContext *s, int flush)
             service->tsi.time_offset = ts->tsi.ts_time - service->tsi.min_time;
         }
         if (service->tsi.min_time != INT64_MAX && (service->tsi.is_buffered || flush) ) { //TODO: check this only on new packet||flush ?
-            if (ts->tsi.ts_time > service->tsi.min_time + service->tsi.time_offset) {
+            if (flush && service->tsi.time_offset == AV_NOPTS_VALUE) {
+                service->tsi.time_offset = ts->tsi.ts_time - service->tsi.min_time;
+            } else if (ts->tsi.ts_time > service->tsi.min_time + service->tsi.time_offset) {
                 tsi_log_ts_st(s, service->tsi.min_time_ts_st, AV_LOG_ERROR, "incorrect stream interleaving. Time jumped back (time=%.3fsec diff=%.3fsec)\n",
                        ts->tsi.ts_time / 90000.0, -(service->tsi.min_time + service->tsi.time_offset - ts->tsi.ts_time) / 90000.0);
                 service->tsi.time_offset = ts->tsi.ts_time - service->tsi.min_time;
