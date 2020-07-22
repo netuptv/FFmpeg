@@ -275,6 +275,7 @@ typedef struct MpegTSPesPacket {
 }MpegTSPesPacket;
 
 typedef struct MpegTSWriteStream {
+    struct MpegTSService *service;
     int pid; /* stream associated pid */
     int cc;
     int discontinuity;
@@ -869,6 +870,18 @@ static int64_t get_pcr(const MpegTSWrite *ts, AVIOContext *pb)
 {
     return av_rescale(avio_tell(pb) + 11, 8 * PCR_TIME_BASE, ts->mux_rate) +
            ts->first_pcr;
+}
+
+static void mpegts_prefix_m2ts_header(AVFormatContext *s)
+{
+    MpegTSWrite *ts = s->priv_data;
+    if (ts->m2ts_mode) {
+        int64_t pcr = get_pcr(s->priv_data, s->pb);
+        uint32_t tp_extra_header = pcr % 0x3fffffff;
+        tp_extra_header = AV_RB32(&tp_extra_header);
+        avio_write(s->pb, (unsigned char *) &tp_extra_header,
+                   sizeof(tp_extra_header));
+    }
 }
 
 static void write_packet(AVFormatContext *s, const uint8_t *packet)
@@ -1674,6 +1687,7 @@ static void select_pcr_streams(AVFormatContext *s)
 static int mpegts_init(AVFormatContext *s)
 {
     MpegTSWrite *ts = s->priv_data;
+    MpegTSService **service = NULL;
     int i, j;
     int ret;
 
@@ -1706,13 +1720,21 @@ static int mpegts_init(AVFormatContext *s)
 
     if (!s->nb_programs) {
         /* allocate a single DVB service */
-        if (!mpegts_add_service(s, ts->service_id, s->metadata, NULL))
+        service = (MpegTSService **)malloc(sizeof(MpegTSService *));
+        service[0] = mpegts_add_service(s, ts->service_id, s->metadata, NULL);
+        if (!service[0]) {
+            free(service);
             return AVERROR(ENOMEM);
+        }
     } else {
+        service = (MpegTSService **)malloc(s->nb_programs * sizeof(MpegTSService *));
         for (i = 0; i < s->nb_programs; i++) {
             AVProgram *program = s->programs[i];
-            if (!mpegts_add_service(s, program->id, program->metadata, program))
+            service[i] = mpegts_add_service(s, program->id, program->metadata, program);
+            if (!service[i]) {
+                free(service);
                 return AVERROR(ENOMEM);
+            }
         }
     }
 
@@ -1737,14 +1759,17 @@ static int mpegts_init(AVFormatContext *s)
 
         ts_st = av_mallocz(sizeof(MpegTSWriteStream));
         if (!ts_st) {
+            free(service);
             return AVERROR(ENOMEM);
         }
         st->priv_data = ts_st;
+        ts_st->service = service[s->nb_programs ? st->program_num : 0];
 
         avpriv_set_pts_info(st, 33, 1, 90000);
 
         ts_st->payload = av_mallocz(ts->pes_payload_size);
         if (!ts_st->payload) {
+            free(service);
             return AVERROR(ENOMEM);
         }
 
@@ -1776,6 +1801,7 @@ static int mpegts_init(AVFormatContext *s)
                     ts->m2ts_textsub_pid > M2TS_TEXTSUB_PID + 1        ||
                     ts_st->pid < 16) {
                     av_log(s, AV_LOG_ERROR, "Cannot automatically assign PID for stream %d\n", st->index);
+                    free(service);
                     return AVERROR(EINVAL);
                 }
             } else {
@@ -1787,16 +1813,19 @@ static int mpegts_init(AVFormatContext *s)
         if (ts_st->pid >= 0x1FFF) {
             av_log(s, AV_LOG_ERROR,
                    "Invalid stream id %d, must be less than 8191\n", st->id);
+            free(service);
             return AVERROR(EINVAL);
         }
         for (j = 0; j < ts->nb_services; j++) {
             if (ts->services[j]->pmt.pid > LAST_OTHER_PID) {
                 av_log(s, AV_LOG_ERROR,
                        "Invalid PMT PID %d, must be less than %d\n", ts->services[j]->pmt.pid, LAST_OTHER_PID + 1);
+                free(service);
                 return AVERROR(EINVAL);
             }
             if (ts_st->pid == ts->services[j]->pmt.pid) {
                 av_log(s, AV_LOG_ERROR, "PID %d cannot be both elementary and PMT PID\n", ts_st->pid);
+                free(service);
                 return AVERROR(EINVAL);
             }
         }
@@ -1804,6 +1833,7 @@ static int mpegts_init(AVFormatContext *s)
             MpegTSWriteStream *ts_st_prev = s->streams[j]->priv_data;
             if (ts_st_prev->pid == ts_st->pid) {
                 av_log(s, AV_LOG_ERROR, "Duplicate stream id %d\n", ts_st->pid);
+                free(service);
                 return AVERROR(EINVAL);
             }
         }
@@ -1817,24 +1847,31 @@ static int mpegts_init(AVFormatContext *s)
             AVStream *ast;
             ts_st->amux = avformat_alloc_context();
             if (!ts_st->amux) {
+                free(service);
                 return AVERROR(ENOMEM);
             }
             ts_st->amux->oformat =
                 av_guess_format((ts->flags & MPEGTS_FLAG_AAC_LATM) ? "latm" : "adts",
                                 NULL, NULL);
             if (!ts_st->amux->oformat) {
+                free(service);
                 return AVERROR(EINVAL);
             }
             if (!(ast = avformat_new_stream(ts_st->amux, NULL))) {
+                free(service);
                 return AVERROR(ENOMEM);
             }
             ret = avcodec_parameters_copy(ast->codecpar, st->codecpar);
-            if (ret != 0)
+            if (ret != 0) {
+                free(service);
                 return ret;
+            }
             ast->time_base = st->time_base;
             ret = avformat_write_header(ts_st->amux, NULL);
-            if (ret < 0)
+            if (ret < 0) {
+                free(service);
                 return ret;
+            }
         }
         if (st->codecpar->codec_id == AV_CODEC_ID_OPUS) {
             ts_st->opus_pending_trim_start = st->codecpar->initial_padding * 48000 / st->codecpar->sample_rate;
@@ -1861,7 +1898,7 @@ static int mpegts_init(AVFormatContext *s)
            av_rescale(ts->pat_period, 1000, PCR_TIME_BASE));
 
     tsi_init(s);
-
+    free(service);
     return 0;
 }
 
