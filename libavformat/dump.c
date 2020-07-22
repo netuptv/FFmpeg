@@ -27,6 +27,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/log.h"
 #include "libavutil/mastering_display_metadata.h"
+#include "libavutil/dovi_meta.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/opt.h"
 #include "libavutil/avstring.h"
@@ -210,7 +211,7 @@ static void dump_paramchange(void *ctx, AVPacketSideData *sd)
 
     return;
 fail:
-    av_log(ctx, AV_LOG_INFO, "unknown param");
+    av_log(ctx, AV_LOG_ERROR, "unknown param");
 }
 
 /* replaygain side data*/
@@ -239,7 +240,7 @@ static void dump_replaygain(void *ctx, AVPacketSideData *sd)
     AVReplayGain *rg;
 
     if (sd->size < sizeof(*rg)) {
-        av_log(ctx, AV_LOG_INFO, "invalid data");
+        av_log(ctx, AV_LOG_ERROR, "invalid data");
         return;
     }
     rg = (AVReplayGain*)sd->data;
@@ -255,7 +256,7 @@ static void dump_stereo3d(void *ctx, AVPacketSideData *sd)
     AVStereo3D *stereo;
 
     if (sd->size < sizeof(*stereo)) {
-        av_log(ctx, AV_LOG_INFO, "invalid data");
+        av_log(ctx, AV_LOG_ERROR, "invalid data");
         return;
     }
 
@@ -272,7 +273,7 @@ static void dump_audioservicetype(void *ctx, AVPacketSideData *sd)
     enum AVAudioServiceType *ast = (enum AVAudioServiceType *)sd->data;
 
     if (sd->size < sizeof(*ast)) {
-        av_log(ctx, AV_LOG_INFO, "invalid data");
+        av_log(ctx, AV_LOG_ERROR, "invalid data");
         return;
     }
 
@@ -293,7 +294,7 @@ static void dump_audioservicetype(void *ctx, AVPacketSideData *sd)
         av_log(ctx, AV_LOG_INFO, "dialogue");
         break;
     case AV_AUDIO_SERVICE_TYPE_COMMENTARY:
-        av_log(ctx, AV_LOG_INFO, "comentary");
+        av_log(ctx, AV_LOG_INFO, "commentary");
         break;
     case AV_AUDIO_SERVICE_TYPE_EMERGENCY:
         av_log(ctx, AV_LOG_INFO, "emergency");
@@ -315,15 +316,22 @@ static void dump_cpb(void *ctx, AVPacketSideData *sd)
     AVCPBProperties *cpb = (AVCPBProperties *)sd->data;
 
     if (sd->size < sizeof(*cpb)) {
-        av_log(ctx, AV_LOG_INFO, "invalid data");
+        av_log(ctx, AV_LOG_ERROR, "invalid data");
         return;
     }
 
     av_log(ctx, AV_LOG_INFO,
-           "bitrate max/min/avg: %d/%d/%d buffer size: %d vbv_delay: %"PRId64,
+#if FF_API_UNSANITIZED_BITRATES
+           "bitrate max/min/avg: %d/%d/%d buffer size: %d ",
+#else
+           "bitrate max/min/avg: %"PRId64"/%"PRId64"/%"PRId64" buffer size: %d ",
+#endif
            cpb->max_bitrate, cpb->min_bitrate, cpb->avg_bitrate,
-           cpb->buffer_size,
-           cpb->vbv_delay);
+           cpb->buffer_size);
+    if (cpb->vbv_delay == UINT64_MAX)
+        av_log(ctx, AV_LOG_INFO, "vbv_delay: N/A");
+    else
+        av_log(ctx, AV_LOG_INFO, "vbv_delay: %"PRIu64"", cpb->vbv_delay);
 }
 
 static void dump_mastering_display_metadata(void *ctx, AVPacketSideData* sd) {
@@ -343,13 +351,21 @@ static void dump_mastering_display_metadata(void *ctx, AVPacketSideData* sd) {
            av_q2d(metadata->min_luminance), av_q2d(metadata->max_luminance));
 }
 
+static void dump_content_light_metadata(void *ctx, AVPacketSideData* sd)
+{
+    AVContentLightMetadata* metadata = (AVContentLightMetadata*)sd->data;
+    av_log(ctx, AV_LOG_INFO, "Content Light Level Metadata, "
+           "MaxCLL=%d, MaxFALL=%d",
+           metadata->MaxCLL, metadata->MaxFALL);
+}
+
 static void dump_spherical(void *ctx, AVCodecParameters *par, AVPacketSideData *sd)
 {
     AVSphericalMapping *spherical = (AVSphericalMapping *)sd->data;
     double yaw, pitch, roll;
 
     if (sd->size < sizeof(*spherical)) {
-        av_log(ctx, AV_LOG_INFO, "invalid data");
+        av_log(ctx, AV_LOG_ERROR, "invalid data");
         return;
     }
 
@@ -364,10 +380,26 @@ static void dump_spherical(void *ctx, AVCodecParameters *par, AVPacketSideData *
         size_t l, t, r, b;
         av_spherical_tile_bounds(spherical, par->width, par->height,
                                  &l, &t, &r, &b);
-        av_log(ctx, AV_LOG_INFO, "[%zu, %zu, %zu, %zu] ", l, t, r, b);
+        av_log(ctx, AV_LOG_INFO,
+               "[%"SIZE_SPECIFIER", %"SIZE_SPECIFIER", %"SIZE_SPECIFIER", %"SIZE_SPECIFIER"] ",
+               l, t, r, b);
     } else if (spherical->projection == AV_SPHERICAL_CUBEMAP) {
         av_log(ctx, AV_LOG_INFO, "[pad %"PRIu32"] ", spherical->padding);
     }
+}
+
+static void dump_dovi_conf(void *ctx, AVPacketSideData* sd)
+{
+    AVDOVIDecoderConfigurationRecord *dovi = (AVDOVIDecoderConfigurationRecord *)sd->data;
+
+    av_log(ctx, AV_LOG_INFO, "version: %d.%d, profile: %d, level: %d, "
+           "rpu flag: %d, el flag: %d, bl flag: %d, compatibility id: %d",
+           dovi->dv_version_major, dovi->dv_version_minor,
+           dovi->dv_profile, dovi->dv_level,
+           dovi->rpu_present_flag,
+           dovi->el_present_flag,
+           dovi->bl_present_flag,
+           dovi->dv_bl_signal_compatibility_id);
 }
 
 static void dump_sidedata(void *ctx, AVStream *st, const char *indent)
@@ -425,6 +457,16 @@ static void dump_sidedata(void *ctx, AVStream *st, const char *indent)
         case AV_PKT_DATA_SPHERICAL:
             av_log(ctx, AV_LOG_INFO, "spherical: ");
             dump_spherical(ctx, st->codecpar, &sd);
+            break;
+        case AV_PKT_DATA_CONTENT_LIGHT_LEVEL:
+            dump_content_light_metadata(ctx, &sd);
+            break;
+        case AV_PKT_DATA_ICC_PROFILE:
+            av_log(ctx, AV_LOG_INFO, "ICC Profile");
+            break;
+        case AV_PKT_DATA_DOVI_CONF:
+            av_log(ctx, AV_LOG_INFO, "DOVI configuration record: ");
+            dump_dovi_conf(ctx, &sd);
             break;
         default:
             av_log(ctx, AV_LOG_INFO,
@@ -534,6 +576,20 @@ static void dump_stream_format(AVFormatContext *ic, int i,
         av_log(NULL, AV_LOG_INFO, " (visual impaired)");
     if (st->disposition & AV_DISPOSITION_CLEAN_EFFECTS)
         av_log(NULL, AV_LOG_INFO, " (clean effects)");
+    if (st->disposition & AV_DISPOSITION_ATTACHED_PIC)
+        av_log(NULL, AV_LOG_INFO, " (attached pic)");
+    if (st->disposition & AV_DISPOSITION_TIMED_THUMBNAILS)
+        av_log(NULL, AV_LOG_INFO, " (timed thumbnails)");
+    if (st->disposition & AV_DISPOSITION_CAPTIONS)
+        av_log(NULL, AV_LOG_INFO, " (captions)");
+    if (st->disposition & AV_DISPOSITION_DESCRIPTIONS)
+        av_log(NULL, AV_LOG_INFO, " (descriptions)");
+    if (st->disposition & AV_DISPOSITION_METADATA)
+        av_log(NULL, AV_LOG_INFO, " (metadata)");
+    if (st->disposition & AV_DISPOSITION_DEPENDENT)
+        av_log(NULL, AV_LOG_INFO, " (dependent)");
+    if (st->disposition & AV_DISPOSITION_STILL_IMAGE)
+        av_log(NULL, AV_LOG_INFO, " (still image)");
     av_log(NULL, AV_LOG_INFO, "\n");
 
     dump_metadata(NULL, st->metadata, "    ");
@@ -559,7 +615,7 @@ void av_dump_format(AVFormatContext *ic, int index,
     if (!is_output) {
         av_log(NULL, AV_LOG_INFO, "  Duration: ");
         if (ic->duration != AV_NOPTS_VALUE) {
-            int hours, mins, secs, us;
+            int64_t hours, mins, secs, us;
             int64_t duration = ic->duration + (ic->duration <= INT64_MAX - 5000 ? 5000 : 0);
             secs  = duration / AV_TIME_BASE;
             us    = duration % AV_TIME_BASE;
@@ -567,7 +623,7 @@ void av_dump_format(AVFormatContext *ic, int index,
             secs %= 60;
             hours = mins / 60;
             mins %= 60;
-            av_log(NULL, AV_LOG_INFO, "%02d:%02d:%02d.%02d", hours, mins, secs,
+            av_log(NULL, AV_LOG_INFO, "%02"PRId64":%02"PRId64":%02"PRId64".%02"PRId64"", hours, mins, secs,
                    (100 * us) / AV_TIME_BASE);
         } else {
             av_log(NULL, AV_LOG_INFO, "N/A");
@@ -584,7 +640,7 @@ void av_dump_format(AVFormatContext *ic, int index,
         }
         av_log(NULL, AV_LOG_INFO, ", bitrate: ");
         if (ic->bit_rate)
-            av_log(NULL, AV_LOG_INFO, "%"PRId64" kb/s", (int64_t)ic->bit_rate / 1000);
+            av_log(NULL, AV_LOG_INFO, "%"PRId64" kb/s", ic->bit_rate / 1000);
         else
             av_log(NULL, AV_LOG_INFO, "N/A");
         av_log(NULL, AV_LOG_INFO, "\n");

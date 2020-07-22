@@ -298,6 +298,10 @@ static void rac_normalise(RangeCoder *c)
             c->got_error = 1;
             c->low = 1;
         }
+        if (c->low > c->range) {
+            c->got_error = 1;
+            c->low = 1;
+        }
         if (c->range >= RAC_BOTTOM)
             return;
     }
@@ -389,9 +393,10 @@ static int rac_get_model_sym(RangeCoder *c, Model *m)
 
 static int rac_get_model256_sym(RangeCoder *c, Model256 *m)
 {
-    int prob, prob2, helper, val;
+    int val;
     int start, end;
     int ssym;
+    unsigned prob, prob2, helper;
 
     prob2      = c->range;
     c->range >>= MODEL_SCALE;
@@ -732,7 +737,7 @@ static int mss3_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         return buf_size;
     c->got_error = 0;
 
-    if ((ret = ff_reget_buffer(avctx, c->pic)) < 0)
+    if ((ret = ff_reget_buffer(avctx, c->pic, 0)) < 0)
         return ret;
     c->pic->key_frame = keyframe;
     c->pic->pict_type = keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_P;

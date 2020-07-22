@@ -46,6 +46,7 @@ fate-acodec-pcm-f%be: FMT = au
 
 FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_ADX,     ADX)  += adx
 FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_IMA_QT,  AIFF) += ima_qt
+FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_IMA_SSI, KVAG) += ima_ssi
 FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_IMA_WAV, WAV)  += ima_wav
 FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_MS,      WAV)  += ms
 FATE_ACODEC_ADPCM-$(call ENCDEC, ADPCM_SWF,     FLV)  += swf
@@ -59,6 +60,7 @@ fate-acodec-adpcm-%: CODEC = adpcm_$(@:fate-acodec-adpcm-%=%)
 
 fate-acodec-adpcm-adx:     FMT = adx
 fate-acodec-adpcm-ima_qt:  FMT = aiff
+fate-acodec-adpcm-ima_ssi: FMT = kvag
 fate-acodec-adpcm-ima_wav: FMT = wav
 fate-acodec-adpcm-ms:      FMT = wav
 fate-acodec-adpcm-swf:     FMT = flv
@@ -104,14 +106,14 @@ fate-acodec-dca: tests/data/asynth-44100-2.wav
 fate-acodec-dca: SRC = tests/data/asynth-44100-2.wav
 fate-acodec-dca: CMD = md5 -i $(TARGET_PATH)/$(SRC) -c:a dca -strict -2 -f dts -flags +bitexact
 fate-acodec-dca: CMP = oneline
-fate-acodec-dca: REF = 7cd79a3717943a06b217f1130223a86f
+fate-acodec-dca: REF = 2aa580ac67820fce4f581b96ebb34acc
 
 FATE_ACODEC-$(call ENCDEC, DCA, WAV) += fate-acodec-dca2
 fate-acodec-dca2: CMD = enc_dec_pcm dts wav s16le $(SRC) -c:a dca -strict -2 -flags +bitexact
 fate-acodec-dca2: REF = $(SRC)
 fate-acodec-dca2: CMP = stddev
 fate-acodec-dca2: CMP_SHIFT = -2048
-fate-acodec-dca2: CMP_TARGET = 527
+fate-acodec-dca2: CMP_TARGET = 535
 fate-acodec-dca2: SIZE_TOLERANCE = 1632
 
 FATE_ACODEC-$(call ENCDEC, FLAC, FLAC) += fate-acodec-flac fate-acodec-flac-exact-rice

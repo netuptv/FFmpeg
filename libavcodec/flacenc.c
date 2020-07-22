@@ -268,7 +268,7 @@ static av_cold int flac_encode_init(AVCodecContext *avctx)
 
     /* find samplerate in table */
     if (freq < 1)
-        return -1;
+        return AVERROR(EINVAL);
     for (i = 4; i < 12; i++) {
         if (freq == ff_flac_sample_rate_table[i]) {
             s->samplerate = ff_flac_sample_rate_table[i];
@@ -1508,7 +1508,7 @@ AVCodec ff_flac_encoder = {
     .init           = flac_encode_init,
     .encode2        = flac_encode_frame,
     .close          = flac_encode_close,
-    .capabilities   = AV_CODEC_CAP_SMALL_LAST_FRAME | AV_CODEC_CAP_DELAY | AV_CODEC_CAP_LOSSLESS,
+    .capabilities   = AV_CODEC_CAP_SMALL_LAST_FRAME | AV_CODEC_CAP_DELAY,
     .sample_fmts    = (const enum AVSampleFormat[]){ AV_SAMPLE_FMT_S16,
                                                      AV_SAMPLE_FMT_S32,
                                                      AV_SAMPLE_FMT_NONE },

@@ -94,11 +94,22 @@ typedef struct PTLCommon {
     uint8_t tier_flag;
     uint8_t profile_idc;
     uint8_t profile_compatibility_flag[32];
-    uint8_t level_idc;
     uint8_t progressive_source_flag;
     uint8_t interlaced_source_flag;
     uint8_t non_packed_constraint_flag;
     uint8_t frame_only_constraint_flag;
+    uint8_t max_12bit_constraint_flag;
+    uint8_t max_10bit_constraint_flag;
+    uint8_t max_8bit_constraint_flag;
+    uint8_t max_422chroma_constraint_flag;
+    uint8_t max_420chroma_constraint_flag;
+    uint8_t max_monochrome_constraint_flag;
+    uint8_t intra_constraint_flag;
+    uint8_t one_picture_only_constraint_flag;
+    uint8_t lower_bit_rate_constraint_flag;
+    uint8_t max_14bit_constraint_flag;
+    uint8_t inbld_flag;
+    uint8_t level_idc;
 } PTLCommon;
 
 typedef struct PTL {
@@ -144,13 +155,12 @@ typedef struct HEVCSPS {
     int chroma_format_idc;
     uint8_t separate_colour_plane_flag;
 
-    ///< output (i.e. cropped) values
-    int output_width, output_height;
     HEVCWindow output_window;
 
     HEVCWindow pic_conf_win;
 
     int bit_depth;
+    int bit_depth_chroma;
     int pixel_shift;
     enum AVPixelFormat pix_fmt;
 
@@ -163,6 +173,7 @@ typedef struct HEVCSPS {
         int num_reorder_pics;
         int max_latency_increase;
     } temporal_layer[HEVC_MAX_SUB_LAYERS];
+    uint8_t temporal_id_nesting_flag;
 
     VUI vui;
     PTL ptl;
@@ -171,14 +182,14 @@ typedef struct HEVCSPS {
     ScalingList scaling_list;
 
     unsigned int nb_st_rps;
-    ShortTermRPS st_rps[HEVC_MAX_SHORT_TERM_RPS_COUNT];
+    ShortTermRPS st_rps[HEVC_MAX_SHORT_TERM_REF_PIC_SETS];
 
     uint8_t amp_enabled_flag;
     uint8_t sao_enabled;
 
     uint8_t long_term_ref_pics_present_flag;
-    uint16_t lt_ref_pic_poc_lsb_sps[32];
-    uint8_t used_by_curr_pic_lt_sps_flag[32];
+    uint16_t lt_ref_pic_poc_lsb_sps[HEVC_MAX_LONG_TERM_REF_PICS];
+    uint8_t used_by_curr_pic_lt_sps_flag[HEVC_MAX_LONG_TERM_REF_PICS];
     uint8_t num_long_term_ref_pics_sps;
 
     struct {
@@ -201,12 +212,16 @@ typedef struct HEVCSPS {
     int max_transform_hierarchy_depth_inter;
     int max_transform_hierarchy_depth_intra;
 
+    int sps_range_extension_flag;
     int transform_skip_rotation_enabled_flag;
     int transform_skip_context_enabled_flag;
     int implicit_rdpcm_enabled_flag;
     int explicit_rdpcm_enabled_flag;
+    int extended_precision_processing_flag;
     int intra_smoothing_disabled_flag;
+    int high_precision_offsets_enabled_flag;
     int persistent_rice_adaptation_enabled_flag;
+    int cabac_bypass_alignment_enabled_flag;
 
     ///< coded frame dimension in various units
     int width;
@@ -260,8 +275,8 @@ typedef struct HEVCPPS {
     uint8_t tiles_enabled_flag;
     uint8_t entropy_coding_sync_enabled_flag;
 
-    int num_tile_columns;   ///< num_tile_columns_minus1 + 1
-    int num_tile_rows;      ///< num_tile_rows_minus1 + 1
+    uint16_t num_tile_columns;   ///< num_tile_columns_minus1 + 1
+    uint16_t num_tile_rows;      ///< num_tile_rows_minus1 + 1
     uint8_t uniform_spacing_flag;
     uint8_t loop_filter_across_tiles_enabled_flag;
 
@@ -281,12 +296,13 @@ typedef struct HEVCPPS {
     int num_extra_slice_header_bits;
     uint8_t slice_header_extension_present_flag;
     uint8_t log2_max_transform_skip_block_size;
+    uint8_t pps_range_extensions_flag;
     uint8_t cross_component_prediction_enabled_flag;
     uint8_t chroma_qp_offset_list_enabled_flag;
     uint8_t diff_cu_chroma_qp_offset_depth;
     uint8_t chroma_qp_offset_list_len_minus1;
-    int8_t  cb_qp_offset_list[5];
-    int8_t  cr_qp_offset_list[5];
+    int8_t  cb_qp_offset_list[6];
+    int8_t  cr_qp_offset_list[6];
     uint8_t log2_sao_offset_scale_luma;
     uint8_t log2_sao_offset_scale_chroma;
 
@@ -338,10 +354,17 @@ int ff_hevc_decode_nal_sps(GetBitContext *gb, AVCodecContext *avctx,
 int ff_hevc_decode_nal_pps(GetBitContext *gb, AVCodecContext *avctx,
                            HEVCParamSets *ps);
 
+void ff_hevc_ps_uninit(HEVCParamSets *ps);
+
 int ff_hevc_decode_short_term_rps(GetBitContext *gb, AVCodecContext *avctx,
                                   ShortTermRPS *rps, const HEVCSPS *sps, int is_slice_header);
 
 int ff_hevc_encode_nal_vps(HEVCVPS *vps, unsigned int id,
                            uint8_t *buf, int buf_size);
+
+/**
+ * Compute POC of the current frame and return it.
+ */
+int ff_hevc_compute_poc(const HEVCSPS *sps, int pocTid0, int poc_lsb, int nal_unit_type);
 
 #endif /* AVCODEC_HEVC_PS_H */

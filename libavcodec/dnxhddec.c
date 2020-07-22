@@ -25,7 +25,6 @@
  */
 
 #include "libavutil/imgutils.h"
-#include "libavutil/timer.h"
 #include "avcodec.h"
 #include "blockdsp.h"
 #define  UNCHECKED_BITSTREAM_READER 1
@@ -37,7 +36,7 @@
 #include "thread.h"
 
 typedef struct RowContext {
-    DECLARE_ALIGNED(16, int16_t, blocks)[12][64];
+    DECLARE_ALIGNED(32, int16_t, blocks)[12][64];
     int luma_scale[64];
     int chroma_scale[64];
     GetBitContext gb;
@@ -58,7 +57,7 @@ typedef struct DNXHDContext {
     unsigned int width, height;
     enum AVPixelFormat pix_fmt;
     unsigned int mb_width, mb_height;
-    uint32_t mb_scan_index[256];
+    uint32_t mb_scan_index[512];
     int data_offset;                    // End of mb_scan_index, where macroblocks start
     int cur_field;                      ///< current interlaced field
     VLC ac_vlc, dc_vlc, run_vlc;
@@ -67,6 +66,8 @@ typedef struct DNXHDContext {
     const CIDEntry *cid_table;
     int bit_depth; // 8, 10, 12 or 0 if not initialized at all.
     int is_444;
+    int alpha;
+    int lla;
     int mbaff;
     int act;
     int (*decode_dct_block)(const struct DNXHDContext *ctx,
@@ -93,7 +94,9 @@ static av_cold int dnxhd_decode_init(AVCodecContext *avctx)
 
     ctx->avctx = avctx;
     ctx->cid = -1;
-    avctx->colorspace = AVCOL_SPC_BT709;
+    if (avctx->colorspace == AVCOL_SPC_UNSPECIFIED) {
+        avctx->colorspace = AVCOL_SPC_BT709;
+    }
 
     avctx->coded_width  = FFALIGN(avctx->width,  16);
     avctx->coded_height = FFALIGN(avctx->height, 16);
@@ -138,21 +141,6 @@ static int dnxhd_init_vlc(DNXHDContext *ctx, uint32_t cid, int bitdepth)
 
         ctx->cid = cid;
     }
-    return 0;
-}
-
-static av_cold int dnxhd_decode_init_thread_copy(AVCodecContext *avctx)
-{
-    DNXHDContext *ctx = avctx->priv_data;
-
-    ctx->avctx = avctx;
-    // make sure VLC tables will be loaded when cid is parsed
-    ctx->cid = -1;
-
-    ctx->rows = av_mallocz_array(avctx->thread_count, sizeof(RowContext));
-    if (!ctx->rows)
-        return AVERROR(ENOMEM);
-
     return 0;
 }
 
@@ -203,6 +191,10 @@ static int dnxhd_decode_header(DNXHDContext *ctx, AVFrame *frame,
         ctx->cur_field = 0;
     }
     ctx->mbaff = (buf[0x6] >> 5) & 1;
+    ctx->alpha = buf[0x7] & 1;
+    ctx->lla   = (buf[0x7] >> 1) & 1;
+    if (ctx->alpha)
+        avpriv_request_sample(ctx->avctx, "alpha");
 
     ctx->height = AV_RB16(buf + 0x18);
     ctx->width  = AV_RB16(buf + 0x1a);
@@ -227,7 +219,14 @@ static int dnxhd_decode_header(DNXHDContext *ctx, AVFrame *frame,
         av_log(ctx->avctx, AV_LOG_WARNING,
                "Adaptive MB interlace flag in an unsupported profile.\n");
 
-    ctx->act = buf[0x2C] & 7;
+    switch ((buf[0x2C] >> 1) & 3) {
+    case 0: frame->colorspace = AVCOL_SPC_BT709;       break;
+    case 1: frame->colorspace = AVCOL_SPC_BT2020_NCL;  break;
+    case 2: frame->colorspace = AVCOL_SPC_BT2020_CL;   break;
+    case 3: frame->colorspace = AVCOL_SPC_UNSPECIFIED; break;
+    }
+
+    ctx->act = buf[0x2C] & 1;
     if (ctx->act && ctx->cid_table->cid != 1256 && ctx->cid_table->cid != 1270)
         av_log(ctx->avctx, AV_LOG_WARNING,
                "Adaptive color transform in an unsupported profile.\n");
@@ -285,7 +284,7 @@ static int dnxhd_decode_header(DNXHDContext *ctx, AVFrame *frame,
     }
 
     ctx->mb_width  = (ctx->width + 15)>> 4;
-    ctx->mb_height = buf[0x16d];
+    ctx->mb_height = AV_RB16(buf + 0x16c);
 
     if ((ctx->height + 15) >> 4 == ctx->mb_height && frame->interlaced_frame)
         ctx->height <<= 1;
@@ -298,13 +297,17 @@ static int dnxhd_decode_header(DNXHDContext *ctx, AVFrame *frame,
     if (ctx->mb_height > 68 && ff_dnxhd_check_header_prefix_hr(header_prefix)) {
         ctx->data_offset = 0x170 + (ctx->mb_height << 2);
     } else {
-        if (ctx->mb_height > 68 ||
-            (ctx->mb_height << frame->interlaced_frame) > (ctx->height + 15) >> 4) {
+        if (ctx->mb_height > 68) {
             av_log(ctx->avctx, AV_LOG_ERROR,
                    "mb height too big: %d\n", ctx->mb_height);
             return AVERROR_INVALIDDATA;
         }
         ctx->data_offset = 0x280;
+    }
+    if ((ctx->mb_height << frame->interlaced_frame) > (ctx->height + 15) >> 4) {
+        av_log(ctx->avctx, AV_LOG_ERROR,
+                "mb height too big: %d\n", ctx->mb_height);
+        return AVERROR_INVALIDDATA;
     }
 
     if (buf_size < ctx->data_offset) {
@@ -313,7 +316,11 @@ static int dnxhd_decode_header(DNXHDContext *ctx, AVFrame *frame,
         return AVERROR_INVALIDDATA;
     }
 
-    av_assert0((unsigned)ctx->mb_height <= FF_ARRAY_ELEMS(ctx->mb_scan_index));
+    if (ctx->mb_height > FF_ARRAY_ELEMS(ctx->mb_scan_index)) {
+        av_log(ctx->avctx, AV_LOG_ERROR,
+               "mb_height too big (%d > %"SIZE_SPECIFIER").\n", ctx->mb_height, FF_ARRAY_ELEMS(ctx->mb_scan_index));
+        return AVERROR_INVALIDDATA;
+    }
 
     for (i = 0; i < ctx->mb_height; i++) {
         ctx->mb_scan_index[i] = AV_RB32(buf + 0x170 + (i << 2));
@@ -373,6 +380,10 @@ static av_always_inline int dnxhd_decode_dct_block(const DNXHDContext *ctx,
 
     UPDATE_CACHE(bs, &row->gb);
     GET_VLC(len, bs, &row->gb, ctx->dc_vlc.table, DNXHD_DC_VLC_BITS, 1);
+    if (len < 0) {
+        ret = len;
+        goto error;
+    }
     if (len) {
         level = GET_CACHE(bs, &row->gb);
         LAST_SKIP_BITS(bs, &row->gb, len);
@@ -426,7 +437,7 @@ static av_always_inline int dnxhd_decode_dct_block(const DNXHDContext *ctx,
         GET_VLC(index1, bs, &row->gb, ctx->ac_vlc.table,
                 DNXHD_VLC_BITS, 2);
     }
-
+error:
     CLOSE_READER(bs, &row->gb);
     return ret;
 }
@@ -569,20 +580,22 @@ static int dnxhd_decode_row(AVCodecContext *avctx, void *data,
     const DNXHDContext *ctx = avctx->priv_data;
     uint32_t offset = ctx->mb_scan_index[rownb];
     RowContext *row = ctx->rows + threadnb;
-    int x;
+    int x, ret;
 
     row->last_dc[0] =
     row->last_dc[1] =
     row->last_dc[2] = 1 << (ctx->bit_depth + 2); // for levels +2^(bitdepth-1)
-    init_get_bits(&row->gb, ctx->buf + offset, (ctx->buf_size - offset) << 3);
+    ret = init_get_bits8(&row->gb, ctx->buf + offset, ctx->buf_size - offset);
+    if (ret < 0) {
+        row->errors++;
+        return ret;
+    }
     for (x = 0; x < ctx->mb_width; x++) {
-        //START_TIMER;
         int ret = dnxhd_decode_macroblock(ctx, row, data, x, rownb);
         if (ret < 0) {
             row->errors++;
             return ret;
         }
-        //STOP_TIMER("decode macroblock");
     }
 
     return 0;
@@ -712,6 +725,5 @@ AVCodec ff_dnxhd_decoder = {
     .decode         = dnxhd_decode_frame,
     .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
                       AV_CODEC_CAP_SLICE_THREADS,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(dnxhd_decode_init_thread_copy),
     .profiles       = NULL_IF_CONFIG_SMALL(ff_dnxhd_profiles),
 };

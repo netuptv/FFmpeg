@@ -72,7 +72,7 @@ do {                                                                            
             for (j = 0; j < b->nb; j++)                                         \
                 if (a->fmts[i] == b->fmts[j]) {                                 \
                     if(k >= FFMIN(a->nb, b->nb)){                               \
-                        av_log(NULL, AV_LOG_ERROR, "Duplicate formats in avfilter_merge_formats() detected\n"); \
+                        av_log(NULL, AV_LOG_ERROR, "Duplicate formats in %s detected\n", __FUNCTION__); \
                         av_free(ret->fmts);                                     \
                         av_free(ret);                                           \
                         return NULL;                                            \
@@ -317,7 +317,6 @@ do {                                                        \
     void *oldf = *f;                                        \
                                                             \
     if (!(*f) && !(*f = av_mallocz(sizeof(**f)))) {         \
-        unref_fn(f);                                        \
         return AVERROR(ENOMEM);                             \
     }                                                       \
                                                             \
@@ -369,15 +368,46 @@ AVFilterFormats *ff_all_formats(enum AVMediaType type)
     return ret;
 }
 
-const int64_t avfilter_all_channel_layouts[] = {
-#include "all_channel_layouts.inc"
-    -1
-};
+int ff_formats_pixdesc_filter(AVFilterFormats **rfmts, unsigned want, unsigned rej)
+{
+    unsigned nb_formats, fmt, flags;
+    AVFilterFormats *formats = NULL;
 
-// AVFilterFormats *avfilter_make_all_channel_layouts(void)
-// {
-//     return avfilter_make_format64_list(avfilter_all_channel_layouts);
-// }
+    while (1) {
+        nb_formats = 0;
+        for (fmt = 0;; fmt++) {
+            const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(fmt);
+            if (!desc)
+                break;
+            flags = desc->flags;
+            if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL) &&
+                !(desc->flags & AV_PIX_FMT_FLAG_PLANAR) &&
+                (desc->log2_chroma_w || desc->log2_chroma_h))
+                flags |= FF_PIX_FMT_FLAG_SW_FLAT_SUB;
+            if ((flags & (want | rej)) != want)
+                continue;
+            if (formats)
+                formats->formats[nb_formats] = fmt;
+            nb_formats++;
+        }
+        if (formats) {
+            av_assert0(formats->nb_formats == nb_formats);
+            *rfmts = formats;
+            return 0;
+        }
+        formats = av_mallocz(sizeof(*formats));
+        if (!formats)
+            return AVERROR(ENOMEM);
+        formats->nb_formats = nb_formats;
+        if (nb_formats) {
+            formats->formats = av_malloc_array(nb_formats, sizeof(*formats->formats));
+            if (!formats->formats) {
+                av_freep(&formats);
+                return AVERROR(ENOMEM);
+            }
+        }
+    }
+}
 
 AVFilterFormats *ff_planar_sample_fmts(void)
 {
@@ -456,7 +486,7 @@ do {                                        \
 do {                                                               \
     int idx = -1;                                                  \
                                                                    \
-    if (!*ref || !(*ref)->refs)                                    \
+    if (!ref || !*ref || !(*ref)->refs)                            \
         return;                                                    \
                                                                    \
     FIND_REF_INDEX(ref, idx);                                      \
@@ -518,7 +548,8 @@ void ff_formats_changeref(AVFilterFormats **oldref, AVFilterFormats **newref)
             int ret = ref_fn(fmts, &ctx->inputs[i]->out_fmts);      \
             if (ret < 0) {                                          \
                 unref_fn(&fmts);                                    \
-                av_freep(&fmts->list);                              \
+                if (fmts)                                           \
+                    av_freep(&fmts->list);                          \
                 av_freep(&fmts);                                    \
                 return ret;                                         \
             }                                                       \
@@ -530,7 +561,8 @@ void ff_formats_changeref(AVFilterFormats **oldref, AVFilterFormats **newref)
             int ret = ref_fn(fmts, &ctx->outputs[i]->in_fmts);      \
             if (ret < 0) {                                          \
                 unref_fn(&fmts);                                    \
-                av_freep(&fmts->list);                              \
+                if (fmts)                                           \
+                    av_freep(&fmts->list);                          \
                 av_freep(&fmts);                                    \
                 return ret;                                         \
             }                                                       \
@@ -662,20 +694,12 @@ int ff_parse_sample_rate(int *ret, const char *arg, void *log_ctx)
 int ff_parse_channel_layout(int64_t *ret, int *nret, const char *arg,
                             void *log_ctx)
 {
-    char *tail;
     int64_t chlayout;
     int nb_channels;
 
     if (av_get_extended_channel_layout(arg, &chlayout, &nb_channels) < 0) {
-        /* [TEMPORARY 2016-12 -> 2017-12]*/
-        nb_channels = strtol(arg, &tail, 10);
-        if (!errno && *tail == 'c' && *(tail + 1) == '\0' && nb_channels > 0 && nb_channels < 64) {
-            chlayout = 0;
-            av_log(log_ctx, AV_LOG_WARNING, "Deprecated channel count specification '%s'. This will stop working in releases made in 2018 and after.\n", arg);
-        } else {
-            av_log(log_ctx, AV_LOG_ERROR, "Invalid channel layout '%s'\n", arg);
-            return AVERROR(EINVAL);
-        }
+        av_log(log_ctx, AV_LOG_ERROR, "Invalid channel layout '%s'\n", arg);
+        return AVERROR(EINVAL);
     }
     if (!chlayout && !nret) {
         av_log(log_ctx, AV_LOG_ERROR, "Unknown channel layout '%s' is not supported.\n", arg);

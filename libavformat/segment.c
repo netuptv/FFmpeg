@@ -24,8 +24,6 @@
  * @url{http://tools.ietf.org/id/draft-pantos-http-live-streaming}
  */
 
-/* #define DEBUG */
-
 #include <float.h>
 #include <time.h>
 
@@ -74,10 +72,9 @@ typedef struct SegmentContext {
     int segment_idx_wrap;  ///< number after which the index wraps
     int segment_idx_wrap_nb;  ///< number of time the index has wraped
     int segment_count;     ///< number of segment files already written
-    AVOutputFormat *oformat;
+    ff_const59 AVOutputFormat *oformat;
     AVFormatContext *avf;
     char *format;              ///< format to use for output segment files
-    char *format_options_str;  ///< format options to use for output segment files
     AVDictionary *format_options;
     char *list;            ///< filename for the segment list file
     int   list_flags;      ///< flags affecting list generation
@@ -113,7 +110,7 @@ typedef struct SegmentContext {
     int  write_header_trailer; /**< Set by a private option. */
     char *header_filename;  ///< filename to write the output header to
 
-    int reset_timestamps;  ///< reset timestamps at the begin of each segment
+    int reset_timestamps;  ///< reset timestamps at the beginning of each segment
     int64_t initial_offset;    ///< initial timestamps offset, expressed in microseconds
     char *reference_stream_specifier; ///< reference stream specifier
     int   reference_stream_index;
@@ -165,12 +162,11 @@ static int segment_mux_init(AVFormatContext *s)
     oc->flags              = s->flags;
 
     for (i = 0; i < s->nb_streams; i++) {
-        AVStream *st;
-        AVCodecParameters *ipar, *opar;
+        AVStream *st, *ist = s->streams[i];
+        AVCodecParameters *ipar = ist->codecpar, *opar;
 
         if (!(st = avformat_new_stream(oc, NULL)))
             return AVERROR(ENOMEM);
-        ipar = s->streams[i]->codecpar;
         opar = st->codecpar;
         avcodec_parameters_copy(opar, ipar);
         if (!oc->oformat->codec_tag ||
@@ -180,9 +176,17 @@ static int segment_mux_init(AVFormatContext *s)
         } else {
             opar->codec_tag = 0;
         }
-        st->sample_aspect_ratio = s->streams[i]->sample_aspect_ratio;
-        st->time_base = s->streams[i]->time_base;
-        av_dict_copy(&st->metadata, s->streams[i]->metadata, 0);
+        st->sample_aspect_ratio = ist->sample_aspect_ratio;
+        st->time_base           = ist->time_base;
+        st->avg_frame_rate      = ist->avg_frame_rate;
+        st->disposition         = ist->disposition;
+#if FF_API_LAVF_AVCTX
+FF_DISABLE_DEPRECATION_WARNINGS
+        if (ipar->codec_tag == MKTAG('t','m','c','d'))
+            st->codec->time_base = ist->codec->time_base;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
+        av_dict_copy(&st->metadata, ist->metadata, 0);
     }
 
     return 0;
@@ -194,6 +198,8 @@ static int set_segment_filename(AVFormatContext *s)
     AVFormatContext *oc = seg->avf;
     size_t size;
     int ret;
+    char buf[1024];
+    char *new_name;
 
     if (seg->segment_idx_wrap)
         seg->segment_idx %= seg->segment_idx_wrap;
@@ -202,18 +208,22 @@ static int set_segment_filename(AVFormatContext *s)
         struct tm *tm, tmpbuf;
         time(&now0);
         tm = localtime_r(&now0, &tmpbuf);
-        if (!strftime(oc->filename, sizeof(oc->filename), s->filename, tm)) {
+        if (!strftime(buf, sizeof(buf), s->url, tm)) {
             av_log(oc, AV_LOG_ERROR, "Could not get segment filename with strftime\n");
             return AVERROR(EINVAL);
         }
-    } else if (av_get_frame_filename(oc->filename, sizeof(oc->filename),
-                                     s->filename, seg->segment_idx) < 0) {
-        av_log(oc, AV_LOG_ERROR, "Invalid segment filename template '%s'\n", s->filename);
+    } else if (av_get_frame_filename(buf, sizeof(buf),
+                                     s->url, seg->segment_idx) < 0) {
+        av_log(oc, AV_LOG_ERROR, "Invalid segment filename template '%s'\n", s->url);
         return AVERROR(EINVAL);
     }
+    new_name = av_strdup(buf);
+    if (!new_name)
+        return AVERROR(ENOMEM);
+    ff_format_set_url(oc, new_name);
 
     /* copy modified name in list entry */
-    size = strlen(av_basename(oc->filename)) + 1;
+    size = strlen(av_basename(oc->url)) + 1;
     if (seg->entry_prefix)
         size += strlen(seg->entry_prefix);
 
@@ -221,7 +231,7 @@ static int set_segment_filename(AVFormatContext *s)
         return ret;
     snprintf(seg->cur_entry.filename, size, "%s%s",
              seg->entry_prefix ? seg->entry_prefix : "",
-             av_basename(oc->filename));
+             av_basename(oc->url));
 
     return 0;
 }
@@ -247,8 +257,8 @@ static int segment_start(AVFormatContext *s, int write_header)
     if ((err = set_segment_filename(s)) < 0)
         return err;
 
-    if ((err = s->io_open(s, &oc->pb, oc->filename, AVIO_FLAG_WRITE, NULL)) < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to open segment '%s'\n", oc->filename);
+    if ((err = s->io_open(s, &oc->pb, oc->url, AVIO_FLAG_WRITE, NULL)) < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to open segment '%s'\n", oc->url);
         return err;
     }
     if (!seg->individual_header_trailer)
@@ -362,7 +372,7 @@ static int segment_end(AVFormatContext *s, int write_trailer, int is_last)
 
     if (ret < 0)
         av_log(s, AV_LOG_ERROR, "Failure occurred when ending segment '%s'\n",
-               oc->filename);
+               oc->url);
 
     if (seg->list) {
         if (seg->list_size || seg->list_type == LIST_TYPE_M3U8) {
@@ -405,7 +415,7 @@ static int segment_end(AVFormatContext *s, int write_trailer, int is_last)
     }
 
     av_log(s, AV_LOG_VERBOSE, "segment:'%s' count:%d ended\n",
-           seg->avf->filename, seg->segment_count);
+           seg->avf->url, seg->segment_count);
     seg->segment_count++;
 
     if (seg->increment_tc) {
@@ -417,7 +427,7 @@ static int segment_end(AVFormatContext *s, int write_trailer, int is_last)
                     rate = s->streams[i]->avg_frame_rate;/* Get fps from the video stream */
                     err = av_timecode_init_from_string(&tc, rate, tcr->value, s);
                     if (err < 0) {
-                        av_log(s, AV_LOG_WARNING, "Could not increment timecode, error occurred during timecode creation.");
+                        av_log(s, AV_LOG_WARNING, "Could not increment global timecode, error occurred during timecode creation.\n");
                         break;
                     }
                     tc.start += (int)((seg->cur_entry.end_time - seg->cur_entry.start_time) * av_q2d(rate));/* increment timecode */
@@ -427,7 +437,23 @@ static int segment_end(AVFormatContext *s, int write_trailer, int is_last)
                 }
             }
         } else {
-            av_log(s, AV_LOG_WARNING, "Could not increment timecode, no timecode metadata found");
+            av_log(s, AV_LOG_WARNING, "Could not increment global timecode, no global timecode metadata found.\n");
+        }
+        for (i = 0; i < s->nb_streams; i++) {
+            if (s->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                char st_buf[AV_TIMECODE_STR_SIZE];
+                AVTimecode st_tc;
+                AVRational st_rate = s->streams[i]->avg_frame_rate;
+                AVDictionaryEntry *st_tcr = av_dict_get(s->streams[i]->metadata, "timecode", NULL, 0);
+                if (st_tcr) {
+                    if ((av_timecode_init_from_string(&st_tc, st_rate, st_tcr->value, s) < 0)) {
+                        av_log(s, AV_LOG_WARNING, "Could not increment stream %d timecode, error occurred during timecode creation.\n", i);
+                        continue;
+                    }
+                st_tc.start += (int)((seg->cur_entry.end_time - seg->cur_entry.start_time) * av_q2d(st_rate));    // increment timecode
+                av_dict_set(&s->streams[i]->metadata, "timecode", av_timecode_make_string(&st_tc, st_buf, 0), 0);
+                }
+            }
         }
     }
 
@@ -571,7 +597,7 @@ static int open_null_ctx(AVIOContext **ctx)
 static void close_null_ctxp(AVIOContext **pb)
 {
     av_freep(&(*pb)->buffer);
-    av_freep(pb);
+    avio_context_free(pb);
 }
 
 static int select_reference_stream(AVFormatContext *s)
@@ -693,15 +719,6 @@ static int seg_init(AVFormatContext *s)
         }
     }
 
-    if (seg->format_options_str) {
-        ret = av_dict_parse_string(&seg->format_options, seg->format_options_str, "=", ":", 0);
-        if (ret < 0) {
-            av_log(s, AV_LOG_ERROR, "Could not parse format options list '%s'\n",
-                   seg->format_options_str);
-            return ret;
-        }
-    }
-
     if (seg->list) {
         if (seg->list_type == LIST_TYPE_UNDEFINED) {
             if      (av_match_ext(seg->list, "csv" )) seg->list_type = LIST_TYPE_CSV;
@@ -728,7 +745,7 @@ static int seg_init(AVFormatContext *s)
            seg->reference_stream_index,
            av_get_media_type_string(s->streams[seg->reference_stream_index]->codecpar->codec_type));
 
-    seg->oformat = av_guess_format(seg->format, s->filename, NULL);
+    seg->oformat = av_guess_format(seg->format, s->url, NULL);
 
     if (!seg->oformat)
         return AVERROR_MUXER_NOT_FOUND;
@@ -747,9 +764,9 @@ static int seg_init(AVFormatContext *s)
 
     if (seg->write_header_trailer) {
         if ((ret = s->io_open(s, &oc->pb,
-                              seg->header_filename ? seg->header_filename : oc->filename,
+                              seg->header_filename ? seg->header_filename : oc->url,
                               AVIO_FLAG_WRITE, NULL)) < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to open segment '%s'\n", oc->filename);
+            av_log(s, AV_LOG_ERROR, "Failed to open segment '%s'\n", oc->url);
             return ret;
         }
         if (!seg->individual_header_trailer)
@@ -764,7 +781,7 @@ static int seg_init(AVFormatContext *s)
     ret = avformat_init_output(oc, &options);
     if (av_dict_count(options)) {
         av_log(s, AV_LOG_ERROR,
-               "Some of the provided format options in '%s' are not recognized\n", seg->format_options_str);
+               "Some of the provided format options are not recognized\n");
         av_dict_free(&options);
         return AVERROR(EINVAL);
     }
@@ -832,7 +849,7 @@ static int seg_write_header(AVFormatContext *s)
         } else {
             close_null_ctxp(&oc->pb);
         }
-        if ((ret = oc->io_open(oc, &oc->pb, oc->filename, AVIO_FLAG_WRITE, NULL)) < 0)
+        if ((ret = oc->io_open(oc, &oc->pb, oc->url, AVIO_FLAG_WRITE, NULL)) < 0)
             return ret;
         if (!seg->individual_header_trailer)
             oc->pb->seekable = 0;
@@ -854,6 +871,19 @@ static int seg_write_packet(AVFormatContext *s, AVPacket *pkt)
 
     if (!seg->avf || !seg->avf->pb)
         return AVERROR(EINVAL);
+
+    if (!st->codecpar->extradata_size) {
+        int pkt_extradata_size = 0;
+        uint8_t *pkt_extradata = av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, &pkt_extradata_size);
+        if (pkt_extradata && pkt_extradata_size > 0) {
+            ret = ff_alloc_extradata(st->codecpar, pkt_extradata_size);
+            if (ret < 0) {
+                av_log(s, AV_LOG_WARNING, "Unable to add extradata to stream. Output segments may be invalid.\n");
+                goto calc_times;
+            }
+            memcpy(st->codecpar->extradata, pkt_extradata, pkt_extradata_size);
+        }
+    }
 
 calc_times:
     if (seg->times) {
@@ -919,7 +949,7 @@ calc_times:
 
     if (seg->segment_frame_count == 0) {
         av_log(s, AV_LOG_VERBOSE, "segment:'%s' starts with packet stream:%d pts:%s pts_time:%s frame:%d\n",
-               seg->avf->filename, pkt->stream_index,
+               seg->avf->url, pkt->stream_index,
                av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base), seg->frame_count);
     }
 
@@ -941,7 +971,8 @@ calc_times:
            av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base),
            av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, &st->time_base));
 
-    ret = ff_write_chained(seg->avf, pkt->stream_index, pkt, s, seg->initial_offset || seg->reset_timestamps);
+    ret = ff_write_chained(seg->avf, pkt->stream_index, pkt, s,
+                           seg->initial_offset || seg->reset_timestamps || seg->avf->oformat->interleave_packet);
 
 fail:
     if (pkt->stream_index == seg->reference_stream_index) {
@@ -976,7 +1007,6 @@ fail:
     if (seg->list)
         ff_format_io_close(s, &seg->list_pb);
 
-    av_dict_free(&seg->format_options);
     av_opt_free(seg);
     av_freep(&seg->times);
     av_freep(&seg->frames);
@@ -1004,10 +1034,8 @@ static int seg_check_bitstream(struct AVFormatContext *s, const AVPacket *pkt)
         if (ret == 1) {
             AVStream *st = s->streams[pkt->stream_index];
             AVStream *ost = oc->streams[pkt->stream_index];
-            st->internal->bsfcs = ost->internal->bsfcs;
-            st->internal->nb_bsfcs = ost->internal->nb_bsfcs;
-            ost->internal->bsfcs = NULL;
-            ost->internal->nb_bsfcs = 0;
+            st->internal->bsfc = ost->internal->bsfc;
+            ost->internal->bsfc = NULL;
         }
         return ret;
     }
@@ -1017,9 +1045,9 @@ static int seg_check_bitstream(struct AVFormatContext *s, const AVPacket *pkt)
 #define OFFSET(x) offsetof(SegmentContext, x)
 #define E AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    { "reference_stream",  "set reference stream", OFFSET(reference_stream_specifier), AV_OPT_TYPE_STRING, {.str = "auto"}, CHAR_MIN, CHAR_MAX, E },
+    { "reference_stream",  "set reference stream", OFFSET(reference_stream_specifier), AV_OPT_TYPE_STRING, {.str = "auto"}, 0, 0, E },
     { "segment_format",    "set container format used for the segments", OFFSET(format),  AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,       E },
-    { "segment_format_options", "set list of options for the container format used for the segments", OFFSET(format_options_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, E },
+    { "segment_format_options", "set list of options for the container format used for the segments", OFFSET(format_options), AV_OPT_TYPE_DICT, {.str = NULL}, 0, 0, E },
     { "segment_list",      "set the segment list filename",              OFFSET(list),    AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,       E },
     { "segment_header_filename", "write a single file containing the header", OFFSET(header_filename), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, E },
 
@@ -1041,7 +1069,7 @@ static const AVOption options[] = {
     { "segment_clocktime_offset", "set segment clocktime offset",        OFFSET(clocktime_offset), AV_OPT_TYPE_DURATION, {.i64 = 0}, 0, 86400000000LL, E},
     { "segment_clocktime_wrap_duration", "set segment clocktime wrapping duration", OFFSET(clocktime_wrap_duration), AV_OPT_TYPE_DURATION, {.i64 = INT64_MAX}, 0, INT64_MAX, E},
     { "segment_time",      "set segment duration",                       OFFSET(time_str),AV_OPT_TYPE_STRING, {.str = NULL},  0, 0,       E },
-    { "segment_time_delta","set approximation value used for the segment times", OFFSET(time_delta), AV_OPT_TYPE_DURATION, {.i64 = 0}, 0, 0, E },
+    { "segment_time_delta","set approximation value used for the segment times", OFFSET(time_delta), AV_OPT_TYPE_DURATION, {.i64 = 0}, 0, INT64_MAX, E },
     { "segment_times",     "set segment split time points",              OFFSET(times_str),AV_OPT_TYPE_STRING,{.str = NULL},  0, 0,       E },
     { "segment_frames",    "set segment split frame numbers",            OFFSET(frames_str),AV_OPT_TYPE_STRING,{.str = NULL},  0, 0,       E },
     { "segment_wrap",      "set number after which the index wraps",     OFFSET(segment_idx_wrap), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, E },
@@ -1054,12 +1082,13 @@ static const AVOption options[] = {
 
     { "individual_header_trailer", "write header/trailer to each segment", OFFSET(individual_header_trailer), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, E },
     { "write_header_trailer", "write a header to the first segment and a trailer to the last one", OFFSET(write_header_trailer), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, E },
-    { "reset_timestamps", "reset timestamps at the begin of each segment", OFFSET(reset_timestamps), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, E },
+    { "reset_timestamps", "reset timestamps at the beginning of each segment", OFFSET(reset_timestamps), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, E },
     { "initial_offset", "set initial timestamp offset", OFFSET(initial_offset), AV_OPT_TYPE_DURATION, {.i64 = 0}, -INT64_MAX, INT64_MAX, E },
     { "write_empty_segments", "allow writing empty 'filler' segments", OFFSET(write_empty), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, E },
     { NULL },
 };
 
+#if CONFIG_SEGMENT_MUXER
 static const AVClass seg_class = {
     .class_name = "segment muxer",
     .item_name  = av_default_item_name,
@@ -1080,7 +1109,9 @@ AVOutputFormat ff_segment_muxer = {
     .check_bitstream = seg_check_bitstream,
     .priv_class     = &seg_class,
 };
+#endif
 
+#if CONFIG_STREAM_SEGMENT_MUXER
 static const AVClass sseg_class = {
     .class_name = "stream_segment muxer",
     .item_name  = av_default_item_name,
@@ -1101,3 +1132,4 @@ AVOutputFormat ff_stream_segment_muxer = {
     .check_bitstream = seg_check_bitstream,
     .priv_class     = &sseg_class,
 };
+#endif

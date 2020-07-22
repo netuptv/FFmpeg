@@ -462,11 +462,11 @@ static void destroy_buffers(SANMVideoContext *ctx)
 
 static av_cold int init_buffers(SANMVideoContext *ctx)
 {
-    av_fast_padded_malloc(&ctx->frm0, &ctx->frm0_size, ctx->buf_size);
-    av_fast_padded_malloc(&ctx->frm1, &ctx->frm1_size, ctx->buf_size);
-    av_fast_padded_malloc(&ctx->frm2, &ctx->frm2_size, ctx->buf_size);
+    av_fast_padded_mallocz(&ctx->frm0, &ctx->frm0_size, ctx->buf_size);
+    av_fast_padded_mallocz(&ctx->frm1, &ctx->frm1_size, ctx->buf_size);
+    av_fast_padded_mallocz(&ctx->frm2, &ctx->frm2_size, ctx->buf_size);
     if (!ctx->version)
-        av_fast_padded_malloc(&ctx->stored_frame,
+        av_fast_padded_mallocz(&ctx->stored_frame,
                               &ctx->stored_frame_size, ctx->buf_size);
 
     if (!ctx->frm0 || !ctx->frm1 || !ctx->frm2 ||
@@ -491,6 +491,11 @@ static av_cold int decode_init(AVCodecContext *avctx)
 
     ctx->avctx   = avctx;
     ctx->version = !avctx->extradata_size;
+    // early sanity check before allocations to avoid need for deallocation code.
+    if (!ctx->version && avctx->extradata_size < 1026) {
+        av_log(avctx, AV_LOG_ERROR, "Not enough extradata.\n");
+        return AVERROR_INVALIDDATA;
+    }
 
     avctx->pix_fmt = ctx->version ? AV_PIX_FMT_RGB565 : AV_PIX_FMT_PAL8;
 
@@ -505,11 +510,6 @@ static av_cold int decode_init(AVCodecContext *avctx)
 
     if (!ctx->version) {
         int i;
-
-        if (avctx->extradata_size < 1026) {
-            av_log(avctx, AV_LOG_ERROR, "Not enough extradata.\n");
-            return AVERROR_INVALIDDATA;
-        }
 
         ctx->subversion = AV_RL16(avctx->extradata);
         for (i = 0; i < PALETTE_SIZE; i++)
@@ -1358,8 +1358,10 @@ static int read_frame_header(SANMVideoContext *ctx, SANMFrameHeader *hdr)
 
 static void fill_frame(uint16_t *pbuf, int buf_size, uint16_t color)
 {
-    while (buf_size--)
+    if (buf_size--) {
         *pbuf++ = color;
+        av_memcpy_backptr((uint8_t*)pbuf, 2, 2*buf_size);
+    }
 }
 
 static int copy_output(SANMVideoContext *ctx, SANMFrameHeader *hdr)

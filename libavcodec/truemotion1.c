@@ -180,7 +180,7 @@ static int make_ydt15_entry(int p1, int p2, int16_t *ydt)
     lo += (lo * 32) + (lo * 1024);
     hi = ydt[p2];
     hi += (hi * 32) + (hi * 1024);
-    return (lo + (hi * (1 << 16))) * 2;
+    return (lo + (hi * (1U << 16))) * 2;
 }
 
 static int make_cdt15_entry(int p1, int p2, int16_t *cdt)
@@ -190,7 +190,7 @@ static int make_cdt15_entry(int p1, int p2, int16_t *cdt)
     b = cdt[p2];
     r = cdt[p1] * 1024;
     lo = b + r;
-    return (lo + (lo * (1 << 16))) * 2;
+    return (lo + (lo * (1U << 16))) * 2;
 }
 
 #if HAVE_BIGENDIAN
@@ -444,6 +444,8 @@ static int truemotion1_decode_header(TrueMotion1Context *s)
     if (s->flags & FLAG_KEYFRAME) {
         /* no change bits specified for a keyframe; only index bytes */
         s->index_stream = s->mb_change_bits;
+        if (s->avctx->width * s->avctx->height / 2048 + header.header_size > s->size)
+            return AVERROR_INVALIDDATA;
     } else {
         /* one change bit per 4x4 block */
         s->index_stream = s->mb_change_bits +
@@ -882,7 +884,7 @@ static int truemotion1_decode_frame(AVCodecContext *avctx,
     if ((ret = truemotion1_decode_header(s)) < 0)
         return ret;
 
-    if ((ret = ff_reget_buffer(avctx, s->frame)) < 0)
+    if ((ret = ff_reget_buffer(avctx, s->frame, 0)) < 0)
         return ret;
 
     if (compression_types[s->compression].algorithm == ALGO_RGB24H) {

@@ -39,16 +39,85 @@
 #define AUDIO_INBUF_SIZE 20480
 #define AUDIO_REFILL_THRESH 4096
 
+static int get_format_from_sample_fmt(const char **fmt,
+                                      enum AVSampleFormat sample_fmt)
+{
+    int i;
+    struct sample_fmt_entry {
+        enum AVSampleFormat sample_fmt; const char *fmt_be, *fmt_le;
+    } sample_fmt_entries[] = {
+        { AV_SAMPLE_FMT_U8,  "u8",    "u8"    },
+        { AV_SAMPLE_FMT_S16, "s16be", "s16le" },
+        { AV_SAMPLE_FMT_S32, "s32be", "s32le" },
+        { AV_SAMPLE_FMT_FLT, "f32be", "f32le" },
+        { AV_SAMPLE_FMT_DBL, "f64be", "f64le" },
+    };
+    *fmt = NULL;
+
+    for (i = 0; i < FF_ARRAY_ELEMS(sample_fmt_entries); i++) {
+        struct sample_fmt_entry *entry = &sample_fmt_entries[i];
+        if (sample_fmt == entry->sample_fmt) {
+            *fmt = AV_NE(entry->fmt_be, entry->fmt_le);
+            return 0;
+        }
+    }
+
+    fprintf(stderr,
+            "sample format %s is not supported as output format\n",
+            av_get_sample_fmt_name(sample_fmt));
+    return -1;
+}
+
+static void decode(AVCodecContext *dec_ctx, AVPacket *pkt, AVFrame *frame,
+                   FILE *outfile)
+{
+    int i, ch;
+    int ret, data_size;
+
+    /* send the packet with the compressed data to the decoder */
+    ret = avcodec_send_packet(dec_ctx, pkt);
+    if (ret < 0) {
+        fprintf(stderr, "Error submitting the packet to the decoder\n");
+        exit(1);
+    }
+
+    /* read all the output frames (in general there may be any number of them */
+    while (ret >= 0) {
+        ret = avcodec_receive_frame(dec_ctx, frame);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            return;
+        else if (ret < 0) {
+            fprintf(stderr, "Error during decoding\n");
+            exit(1);
+        }
+        data_size = av_get_bytes_per_sample(dec_ctx->sample_fmt);
+        if (data_size < 0) {
+            /* This should not occur, checking just for paranoia */
+            fprintf(stderr, "Failed to calculate data size\n");
+            exit(1);
+        }
+        for (i = 0; i < frame->nb_samples; i++)
+            for (ch = 0; ch < dec_ctx->channels; ch++)
+                fwrite(frame->data[ch] + data_size*i, 1, data_size, outfile);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *outfilename, *filename;
     const AVCodec *codec;
     AVCodecContext *c= NULL;
-    int len;
+    AVCodecParserContext *parser = NULL;
+    int len, ret;
     FILE *f, *outfile;
     uint8_t inbuf[AUDIO_INBUF_SIZE + AV_INPUT_BUFFER_PADDING_SIZE];
-    AVPacket avpkt;
+    uint8_t *data;
+    size_t   data_size;
+    AVPacket *pkt;
     AVFrame *decoded_frame = NULL;
+    enum AVSampleFormat sfmt;
+    int n_channels = 0;
+    const char *fmt;
 
     if (argc <= 2) {
         fprintf(stderr, "Usage: %s <input file> <output file>\n", argv[0]);
@@ -57,15 +126,18 @@ int main(int argc, char **argv)
     filename    = argv[1];
     outfilename = argv[2];
 
-    /* register all the codecs */
-    avcodec_register_all();
-
-    av_init_packet(&avpkt);
+    pkt = av_packet_alloc();
 
     /* find the MPEG audio decoder */
     codec = avcodec_find_decoder(AV_CODEC_ID_MP2);
     if (!codec) {
         fprintf(stderr, "Codec not found\n");
+        exit(1);
+    }
+
+    parser = av_parser_init(codec->id);
+    if (!parser) {
+        fprintf(stderr, "Parser not found\n");
         exit(1);
     }
 
@@ -93,13 +165,10 @@ int main(int argc, char **argv)
     }
 
     /* decode until eof */
-    avpkt.data = inbuf;
-    avpkt.size = fread(inbuf, 1, AUDIO_INBUF_SIZE, f);
+    data      = inbuf;
+    data_size = fread(inbuf, 1, AUDIO_INBUF_SIZE, f);
 
-    while (avpkt.size > 0) {
-        int i, ch;
-        int got_frame = 0;
-
+    while (data_size > 0) {
         if (!decoded_frame) {
             if (!(decoded_frame = av_frame_alloc())) {
                 fprintf(stderr, "Could not allocate audio frame\n");
@@ -107,46 +176,61 @@ int main(int argc, char **argv)
             }
         }
 
-        len = avcodec_decode_audio4(c, decoded_frame, &got_frame, &avpkt);
-        if (len < 0) {
-            fprintf(stderr, "Error while decoding\n");
+        ret = av_parser_parse2(parser, c, &pkt->data, &pkt->size,
+                               data, data_size,
+                               AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (ret < 0) {
+            fprintf(stderr, "Error while parsing\n");
             exit(1);
         }
-        if (got_frame) {
-            /* if a frame has been decoded, output it */
-            int data_size = av_get_bytes_per_sample(c->sample_fmt);
-            if (data_size < 0) {
-                /* This should not occur, checking just for paranoia */
-                fprintf(stderr, "Failed to calculate data size\n");
-                exit(1);
-            }
-            for (i=0; i<decoded_frame->nb_samples; i++)
-                for (ch=0; ch<c->channels; ch++)
-                    fwrite(decoded_frame->data[ch] + data_size*i, 1, data_size, outfile);
-        }
-        avpkt.size -= len;
-        avpkt.data += len;
-        avpkt.dts =
-        avpkt.pts = AV_NOPTS_VALUE;
-        if (avpkt.size < AUDIO_REFILL_THRESH) {
-            /* Refill the input buffer, to avoid trying to decode
-             * incomplete frames. Instead of this, one could also use
-             * a parser, or use a proper container format through
-             * libavformat. */
-            memmove(inbuf, avpkt.data, avpkt.size);
-            avpkt.data = inbuf;
-            len = fread(avpkt.data + avpkt.size, 1,
-                        AUDIO_INBUF_SIZE - avpkt.size, f);
+        data      += ret;
+        data_size -= ret;
+
+        if (pkt->size)
+            decode(c, pkt, decoded_frame, outfile);
+
+        if (data_size < AUDIO_REFILL_THRESH) {
+            memmove(inbuf, data, data_size);
+            data = inbuf;
+            len = fread(data + data_size, 1,
+                        AUDIO_INBUF_SIZE - data_size, f);
             if (len > 0)
-                avpkt.size += len;
+                data_size += len;
         }
     }
 
+    /* flush the decoder */
+    pkt->data = NULL;
+    pkt->size = 0;
+    decode(c, pkt, decoded_frame, outfile);
+
+    /* print output pcm infomations, because there have no metadata of pcm */
+    sfmt = c->sample_fmt;
+
+    if (av_sample_fmt_is_planar(sfmt)) {
+        const char *packed = av_get_sample_fmt_name(sfmt);
+        printf("Warning: the sample format the decoder produced is planar "
+               "(%s). This example will output the first channel only.\n",
+               packed ? packed : "?");
+        sfmt = av_get_packed_sample_fmt(sfmt);
+    }
+
+    n_channels = c->channels;
+    if ((ret = get_format_from_sample_fmt(&fmt, sfmt)) < 0)
+        goto end;
+
+    printf("Play the output audio file with the command:\n"
+           "ffplay -f %s -ac %d -ar %d %s\n",
+           fmt, n_channels, c->sample_rate,
+           outfilename);
+end:
     fclose(outfile);
     fclose(f);
 
     avcodec_free_context(&c);
+    av_parser_close(parser);
     av_frame_free(&decoded_frame);
+    av_packet_free(&pkt);
 
     return 0;
 }

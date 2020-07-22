@@ -62,10 +62,11 @@ static const char *const var_names[] = {
 #define OFFSET(x) offsetof(VolumeContext, x)
 #define A AV_OPT_FLAG_AUDIO_PARAM
 #define F AV_OPT_FLAG_FILTERING_PARAM
+#define T AV_OPT_FLAG_RUNTIME_PARAM
 
 static const AVOption volume_options[] = {
     { "volume", "set volume adjustment expression",
-            OFFSET(volume_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, .flags = A|F },
+            OFFSET(volume_expr), AV_OPT_TYPE_STRING, { .str = "1.0" }, .flags = A|F|T },
     { "precision", "select mathematical precision",
             OFFSET(precision), AV_OPT_TYPE_INT, { .i64 = PRECISION_FLOAT }, PRECISION_FIXED, PRECISION_DOUBLE, A|F, "precision" },
         { "fixed",  "select 8-bit fixed-point",     0, AV_OPT_TYPE_CONST, { .i64 = PRECISION_FIXED  }, INT_MIN, INT_MAX, A|F, "precision" },
@@ -395,7 +396,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *buf)
     vol->var_values[VAR_T  ] = TS2T(buf->pts, inlink->time_base);
     vol->var_values[VAR_N  ] = inlink->frame_count_out;
 
-    pos = av_frame_get_pkt_pos(buf);
+    pos = buf->pkt_pos;
     vol->var_values[VAR_POS] = pos == -1 ? NAN : pos;
     if (vol->eval_mode == EVAL_MODE_FRAME)
         set_volume(ctx);
@@ -410,9 +411,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *buf)
             && (vol->precision != PRECISION_FIXED || vol->volume_i > 0)) {
         out_buf = buf;
     } else {
-        out_buf = ff_get_audio_buffer(inlink, nb_samples);
-        if (!out_buf)
+        out_buf = ff_get_audio_buffer(outlink, nb_samples);
+        if (!out_buf) {
+            av_frame_free(&buf);
             return AVERROR(ENOMEM);
+        }
         ret = av_frame_copy_props(out_buf, buf);
         if (ret < 0) {
             av_frame_free(&out_buf);

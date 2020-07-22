@@ -115,7 +115,7 @@ static int config_input(AVFilterLink *inlink)
     s->delay_frame->nb_samples     = new_size;
     s->delay_frame->channel_layout = inlink->channel_layout;
 
-    return av_frame_get_buffer(s->delay_frame, 32);
+    return av_frame_get_buffer(s->delay_frame, 0);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
@@ -131,7 +131,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     AVFrame *out;
     int n, ch;
 
-    out = ff_get_audio_buffer(inlink, in->nb_samples);
+    out = ff_get_audio_buffer(ctx->outputs[0], in->nb_samples);
     if (!out) {
         av_frame_free(&in);
         return AVERROR(ENOMEM);

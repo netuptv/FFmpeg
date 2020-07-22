@@ -69,7 +69,7 @@ static inline void max_nbits(int *nbits_ptr, int val)
 
     if (val == 0)
         return;
-    val = abs(val);
+    val = FFABS(val);
     n = 1;
     while (val != 0) {
         n++;
@@ -256,7 +256,7 @@ static int swf_write_header(AVFormatContext *s)
         av_log(s, AV_LOG_ERROR, "Invalid (too large) frame rate %d/%d\n", rate, rate_base);
         return AVERROR(EINVAL);
     }
-    avio_wl16(pb, (rate * 256) / rate_base); /* frame rate */
+    avio_wl16(pb, (rate * 256LL) / rate_base); /* frame rate */
     swf->duration_pos = avio_tell(pb);
     avio_wl16(pb, (uint16_t)(DUMMY_DURATION * (int64_t)rate / rate_base)); /* frame count */
 
@@ -337,7 +337,6 @@ static int swf_write_header(AVFormatContext *s)
         put_swf_end_tag(s);
     }
 
-    avio_flush(s->pb);
     return 0;
 }
 

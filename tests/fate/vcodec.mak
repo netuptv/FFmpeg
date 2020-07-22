@@ -18,9 +18,9 @@ fate-vsynth%-asv1:               ENCOPTS = -qscale 10
 FATE_VCODEC-$(call ENCDEC, ASV2, AVI)   += asv2
 fate-vsynth%-asv2:               ENCOPTS = -qscale 10
 
-FATE_VCODEC-$(call ENCDEC, CINEPAK, MOV) += cinepak
-fate-vsynth%-cinepak:            ENCOPTS  = -vcodec cinepak -frames 3
-fate-vsynth%-cinepak:            FMT      = mov
+FATE_VCODEC-$(call ENCDEC, CINEPAK, AVI) += cinepak
+fate-vsynth%-cinepak:            ENCOPTS = -s sqcif -strip_number_adaptivity 1
+fate-vsynth%-cinepak:            DECOPTS = -s sqcif
 
 FATE_VCODEC-$(call ENCDEC, CLJR, AVI)   += cljr
 fate-vsynth%-cljr:               ENCOPTS = -strict -1
@@ -29,25 +29,35 @@ FATE_VCODEC-$(call ENCDEC, DNXHD, DNXHD) += dnxhd-720p                  \
                                             dnxhd-720p-rd               \
                                             dnxhd-720p-10bit            \
                                             dnxhd-720p-hr-lb            \
-                                            dnxhd-4k-hr-lb              \
-                                            dnxhd-uhd-hr-sq             \
-                                            dnxhd-2k-hr-hq              \
                                             dnxhd-edge1-hr              \
                                             dnxhd-edge2-hr              \
                                             dnxhd-edge3-hr
 
+FATE_VCODEC-$(call ALLYES, DNXHD_ENCODER DNXHD_DECODER LARGE_TESTS) += dnxhd-4k-hr-lb \
+                                                                       dnxhd-2k-hr-hq \
+                                                                       dnxhd-uhd-hr-sq
+
+
 FATE_VCODEC-$(call ENCDEC, VC2 DIRAC, MOV) += vc2-420p vc2-420p10 vc2-420p12 \
                                               vc2-422p vc2-422p10 vc2-422p12 \
-                                              vc2-444p vc2-444p10 vc2-444p12
-fate-vsynth1-vc2-%:              FMT      = mov
-fate-vsynth1-vc2-%:              ENCOPTS = -pix_fmt yuv$(@:fate-vsynth1-vc2-%=%) \
-                                           -vcodec vc2 -frames 5 -strict -1
-fate-vsynth2-vc2-%:              FMT      = mov
-fate-vsynth2-vc2-%:              ENCOPTS = -pix_fmt yuv$(@:fate-vsynth2-vc2-%=%) \
-                                           -vcodec vc2 -frames 5 -strict -1
-fate-vsynth_lena-vc2-%:          FMT      = mov
-fate-vsynth_lena-vc2-%:          ENCOPTS = -pix_fmt yuv$(@:fate-vsynth_lena-vc2-%=%) \
-                                           -vcodec vc2 -frames 5 -strict -1
+                                              vc2-444p vc2-444p10 vc2-444p12 \
+                                              vc2-thaar vc2-t5_3
+fate-vsynth1-vc2-4%:             FMT      = mov
+fate-vsynth1-vc2-4%:             ENCOPTS = -pix_fmt yuv$(@:fate-vsynth1-vc2-%=%) \
+                                           -c:v vc2 -frames 5 -strict -1
+fate-vsynth2-vc2-4%:             FMT      = mov
+fate-vsynth2-vc2-4%:             ENCOPTS = -pix_fmt yuv$(@:fate-vsynth2-vc2-%=%) \
+                                           -c:v vc2 -frames 5 -strict -1
+fate-vsynth_lena-vc2-4%:         FMT      = mov
+fate-vsynth_lena-vc2-4%:         ENCOPTS = -pix_fmt yuv$(@:fate-vsynth_lena-vc2-%=%) \
+                                           -c:v vc2 -frames 5 -strict -1
+
+fate-vsynth1-vc2-t%:             FMT     = mov
+fate-vsynth1-vc2-t%:             ENCOPTS = -pix_fmt yuv422p10 -c:v vc2 -frames 5 -strict -1 -wavelet_type $(@:fate-vsynth1-vc2-t%=%)
+fate-vsynth2-vc2-t%:             FMT     = mov
+fate-vsynth2-vc2-t%:             ENCOPTS = -pix_fmt yuv422p10 -c:v vc2 -frames 5 -strict -1 -wavelet_type $(@:fate-vsynth2-vc2-t%=%)
+fate-vsynth_lena-vc2-t%:         FMT     = mov
+fate-vsynth_lena-vc2-t%:         ENCOPTS = -pix_fmt yuv422p10 -c:v vc2 -frames 5 -strict -1 -wavelet_type $(@:fate-vsynth_lena-vc2-t%=%)
 
 fate-vsynth%-dnxhd-720p:         ENCOPTS = -s hd720 -b 90M              \
                                            -pix_fmt yuv422p -frames 5 -qmax 8
@@ -127,7 +137,7 @@ fate-vsynth%-dnxhd-hr-hq-mov:   ENCOPTS = -s 2kflat -profile:v dnxhr_hq \
 fate-vsynth%-dnxhd-hr-hq-mov:   DECOPTS = -sws_flags area+accurate_rnd+bitexact
 fate-vsynth%-dnxhd-hr-hq-mov:   FMT     = mov
 
-FATE_VCODEC-$(call ENCDEC, DVVIDEO, DV) += dv dv-411 dv-50
+FATE_VCODEC-$(call ENCDEC, DVVIDEO, DV) += dv dv-411 dv-50 dv-hd dv-fhd
 fate-vsynth%-dv:                 CODEC   = dvvideo
 fate-vsynth%-dv:                 ENCOPTS = -dct int -s pal
 fate-vsynth%-dv:                 FMT     = dv
@@ -143,6 +153,18 @@ fate-vsynth%-dv-50:              ENCOPTS = -dct int -s pal -pix_fmt yuv422p \
                                            -sws_flags neighbor
 fate-vsynth%-dv-50:              DECOPTS = -sws_flags neighbor
 fate-vsynth%-dv-50:              FMT     = dv
+
+fate-vsynth%-dv-fhd:             CODEC   = dvvideo
+fate-vsynth%-dv-fhd:             ENCOPTS = -dct int -s 1440x1080 -pix_fmt yuv422p \
+                                           -sws_flags neighbor
+fate-vsynth%-dv-fhd:             DECOPTS = -sws_flags neighbor
+fate-vsynth%-dv-fhd:             FMT     = dv
+
+fate-vsynth%-dv-hd:              CODEC   = dvvideo
+fate-vsynth%-dv-hd:              ENCOPTS = -dct int -s 960x720 -pix_fmt yuv422p \
+                                           -sws_flags neighbor
+fate-vsynth%-dv-hd:              DECOPTS = -sws_flags neighbor
+fate-vsynth%-dv-hd:              FMT     = dv
 
 FATE_VCODEC-$(call ENCDEC, FFV1, AVI)   += ffv1 ffv1-v0 \
                                            ffv1-v3-yuv420p ffv1-v3-yuv422p10 ffv1-v3-yuv444p16 \
@@ -164,10 +186,10 @@ fate-vsynth%-ffv1-v3-rgb48:      ENCOPTS = -level 3 -pix_fmt rgb48 -strict -2 \
 fate-vsynth%-ffv1-v3-rgb48:      DECOPTS = -sws_flags neighbor+bitexact
 
 FATE_VCODEC-$(call ENCDEC, FFVHUFF, AVI) += ffvhuff ffvhuff444 ffvhuff420p12 ffvhuff422p10left ffvhuff444p16
-fate-vsynth%-ffvhuff444:         ENCOPTS = -vcodec ffvhuff -pix_fmt yuv444p
-fate-vsynth%-ffvhuff420p12:      ENCOPTS = -vcodec ffvhuff -pix_fmt yuv420p12le
-fate-vsynth%-ffvhuff422p10left:  ENCOPTS = -vcodec ffvhuff -pix_fmt yuv422p10le -pred left
-fate-vsynth%-ffvhuff444p16:      ENCOPTS = -vcodec ffvhuff -pix_fmt yuv444p16le -pred plane
+fate-vsynth%-ffvhuff444:         ENCOPTS = -c:v ffvhuff -pix_fmt yuv444p
+fate-vsynth%-ffvhuff420p12:      ENCOPTS = -c:v ffvhuff -pix_fmt yuv420p12le
+fate-vsynth%-ffvhuff422p10left:  ENCOPTS = -c:v ffvhuff -pix_fmt yuv422p10le -pred left
+fate-vsynth%-ffvhuff444p16:      ENCOPTS = -c:v ffvhuff -pix_fmt yuv444p16le -pred plane
 
 FATE_VCODEC-$(call ENCDEC, FLASHSV, FLV) += flashsv
 fate-vsynth%-flashsv:            ENCOPTS = -sws_flags neighbor+full_chroma_int
@@ -193,11 +215,11 @@ fate-vsynth%-h263-obmc:          ENCOPTS = -qscale 10 -obmc 1
 fate-vsynth%-h263p:              ENCOPTS = -qscale 2 -flags +aic -umv 1 -aiv 1 -ps 300
 
 FATE_VCODEC-$(call ENCDEC, HUFFYUV, AVI) += huffyuv huffyuvbgr24 huffyuvbgra
-fate-vsynth%-huffyuv:            ENCOPTS = -vcodec huffyuv -pix_fmt yuv422p -sws_flags neighbor
+fate-vsynth%-huffyuv:            ENCOPTS = -c:v huffyuv -pix_fmt yuv422p -sws_flags neighbor
 fate-vsynth%-huffyuv:            DECOPTS = -sws_flags neighbor
-fate-vsynth%-huffyuvbgr24:       ENCOPTS = -vcodec huffyuv -pix_fmt bgr24 -sws_flags neighbor
+fate-vsynth%-huffyuvbgr24:       ENCOPTS = -c:v huffyuv -pix_fmt bgr24 -sws_flags neighbor
 fate-vsynth%-huffyuvbgr24:       DECOPTS = -sws_flags neighbor
-fate-vsynth%-huffyuvbgra:        ENCOPTS = -vcodec huffyuv -pix_fmt bgr32 -sws_flags neighbor
+fate-vsynth%-huffyuvbgra:        ENCOPTS = -c:v huffyuv -pix_fmt bgr32 -sws_flags neighbor
 fate-vsynth%-huffyuvbgra:        DECOPTS = -sws_flags neighbor
 
 FATE_VCODEC-$(call ENCDEC, JPEGLS, AVI) += jpegls
@@ -206,9 +228,9 @@ fate-vsynth%-jpegls:             DECOPTS = -sws_flags area
 
 FATE_VCODEC-$(call ENCDEC, JPEG2000, AVI) += jpeg2000 jpeg2000-97
 fate-vsynth%-jpeg2000:                ENCOPTS = -qscale 7 -strict experimental -pred 1 -pix_fmt rgb24
-fate-vsynth%-jpeg2000:                DECINOPTS = -vcodec jpeg2000
+fate-vsynth%-jpeg2000:                DECINOPTS = -c:v jpeg2000
 fate-vsynth%-jpeg2000-97:             ENCOPTS = -qscale 7 -strict experimental -pix_fmt rgb24
-fate-vsynth%-jpeg2000-97:             DECINOPTS = -vcodec jpeg2000
+fate-vsynth%-jpeg2000-97:             DECINOPTS = -c:v jpeg2000
 
 FATE_VCODEC-$(call ENCDEC, LJPEG MJPEG, AVI) += ljpeg
 fate-vsynth%-ljpeg:              ENCOPTS = -strict -1
@@ -301,7 +323,7 @@ fate-vsynth%-mpeg4-nr:           ENCOPTS = -qscale 8 -flags +mv4 -mbd rd \
 
 fate-vsynth%-mpeg4-nsse:         ENCOPTS = -qscale 7 -cmp nsse -subcmp nsse \
                                            -mbcmp nsse -precmp nsse         \
-                                           -skipcmp nsse
+                                           -skip_cmp nsse
 
 fate-vsynth%-mpeg4-qpel:         ENCOPTS = -qscale 7 -flags +mv4+qpel -mbd 2 \
                                            -bf 2 -cmp 1 -subcmp 2
@@ -328,8 +350,20 @@ fate-vsynth%-mpng:               CODEC   = png
 
 FATE_VCODEC-$(call ENCDEC, MSVIDEO1, AVI) += msvideo1
 
-FATE_VCODEC-$(call ENCDEC, PRORES, MOV) += prores prores_ks
+FATE_VCODEC-$(call ENCDEC, PRORES, MOV) += prores prores_int prores_444 prores_444_int prores_ks
 fate-vsynth%-prores:             FMT     = mov
+
+fate-vsynth%-prores_int:         CODEC   = prores
+fate-vsynth%-prores_int:         ENCOPTS = -flags +ildct
+fate-vsynth%-prores_int:         FMT     = mov
+
+fate-vsynth%-prores_444:         CODEC   = prores
+fate-vsynth%-prores_444:         ENCOPTS = -pix_fmt yuv444p10
+fate-vsynth%-prores_444:         FMT     = mov
+
+fate-vsynth%-prores_444_int:     CODEC   = prores
+fate-vsynth%-prores_444_int:     ENCOPTS = -pix_fmt yuv444p10 -flags +ildct
+fate-vsynth%-prores_444_int:     FMT     = mov
 
 fate-vsynth%-prores_ks:          ENCOPTS = -profile hq
 fate-vsynth%-prores_ks:          FMT     = mov
@@ -376,11 +410,11 @@ fate-vsynth%-rv20:               FMT     = rm
 
 FATE_VCODEC-$(call ENCDEC, SNOW, AVI)   += snow snow-hpel snow-ll
 fate-vsynth%-snow:               ENCOPTS = -qscale 2 -flags +qpel \
-                                           -me_method iter -dia_size 2       \
+                                           -motion_est iter -dia_size 2      \
                                            -cmp 12 -subcmp 12 -s 128x64
 
 fate-vsynth%-snow-hpel:          ENCOPTS = -qscale 2              \
-                                           -me_method iter -dia_size 2       \
+                                           -motion_est iter -dia_size 2      \
                                            -cmp 12 -subcmp 12 -s 128x64
 
 fate-vsynth%-snow-ll:            ENCOPTS = -qscale .001 -pred 1 \
@@ -434,7 +468,7 @@ FATE_VSYNTH_LENA = $(FATE_VCODEC:%=fate-vsynth_lena-%)
 RESIZE_OFF   = dnxhd-720p dnxhd-720p-rd dnxhd-720p-10bit dnxhd-1080i \
                dv dv-411 dv-50 avui snow snow-hpel snow-ll vc2-420p \
                vc2-420p10 vc2-420p12 vc2-422p vc2-422p10 vc2-422p12 \
-               vc2-444p vc2-444p10 vc2-444p12
+               vc2-444p vc2-444p10 vc2-444p12 vc2-thaar vc2-t5_3
 # Incorrect parameters - usually size or color format restrictions
 INC_PAR_OFF  = cinepak h261 h261-trellis h263 h263p h263-obmc msvideo1 \
                roqvideo rv10 rv20 y41p qtrlegray

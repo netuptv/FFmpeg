@@ -24,6 +24,8 @@
  * video padding filter
  */
 
+#include <float.h>  /* DBL_MAX */
+
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -87,6 +89,7 @@ typedef struct PadContext {
     int x, y;               ///< offsets of the input area with respect to the padded area
     int in_w, in_h;         ///< width and height for the padded input video, which has to be aligned to the chroma values in order to avoid chroma issues
     int inlink_w, inlink_h;
+    AVRational aspect;
 
     char *w_expr;           ///< width  expression string
     char *h_expr;           ///< height expression string
@@ -103,6 +106,7 @@ static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     PadContext *s = ctx->priv;
+    AVRational adjusted_aspect = s->aspect;
     int ret;
     double var_values[VARS_NB], res;
     char *expr;
@@ -143,6 +147,15 @@ static int config_input(AVFilterLink *inlink)
     if (!s->w)
         var_values[VAR_OUT_W] = var_values[VAR_OW] = s->w = inlink->w;
 
+    if (adjusted_aspect.num && adjusted_aspect.den) {
+        adjusted_aspect = av_div_q(adjusted_aspect, inlink->sample_aspect_ratio);
+        if (s->h < av_rescale(s->w, adjusted_aspect.den, adjusted_aspect.num)) {
+            s->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = av_rescale(s->w, adjusted_aspect.den, adjusted_aspect.num);
+        } else {
+            s->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = av_rescale(s->h, adjusted_aspect.num, adjusted_aspect.den);
+        }
+    }
+
     /* evaluate x and y */
     av_expr_parse_and_eval(&res, (expr = s->x_expr),
                            var_names, var_values,
@@ -160,14 +173,19 @@ static int config_input(AVFilterLink *inlink)
         goto eval_fail;
     s->x = var_values[VAR_X] = res;
 
-    /* sanity check params */
-    if (s->w < 0 || s->h < 0 || s->x < 0 || s->y < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Negative values are not acceptable.\n");
-        return AVERROR(EINVAL);
-    }
+    if (s->x < 0 || s->x + inlink->w > s->w)
+        s->x = var_values[VAR_X] = (s->w - inlink->w) / 2;
+    if (s->y < 0 || s->y + inlink->h > s->h)
+        s->y = var_values[VAR_Y] = (s->h - inlink->h) / 2;
 
     s->w    = ff_draw_round_to_sub(&s->draw, 0, -1, s->w);
     s->h    = ff_draw_round_to_sub(&s->draw, 1, -1, s->h);
+    /* sanity check params */
+    if (s->w < inlink->w || s->h < inlink->h) {
+        av_log(ctx, AV_LOG_ERROR, "Padded dimensions cannot be smaller than input dimensions.\n");
+        return AVERROR(EINVAL);
+    }
+
     s->x    = ff_draw_round_to_sub(&s->draw, 0, -1, s->x);
     s->y    = ff_draw_round_to_sub(&s->draw, 1, -1, s->y);
     s->in_w = ff_draw_round_to_sub(&s->draw, 0, -1, inlink->w);
@@ -192,7 +210,7 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 
 eval_fail:
-    av_log(NULL, AV_LOG_ERROR,
+    av_log(ctx, AV_LOG_ERROR,
            "Error when evaluating the expression '%s'\n", expr);
     return ret;
 
@@ -399,16 +417,17 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption pad_options[] = {
-    { "width",  "set the pad area width expression",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "w",      "set the pad area width expression",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "height", "set the pad area height expression",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "h",      "set the pad area height expression",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "x",      "set the x offset expression for the input image position", OFFSET(x_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "y",      "set the y offset expression for the input image position", OFFSET(y_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "width",  "set the pad area width expression",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
+    { "w",      "set the pad area width expression",       OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, 0, 0, FLAGS },
+    { "height", "set the pad area height expression",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
+    { "h",      "set the pad area height expression",      OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, 0, 0, FLAGS },
+    { "x",      "set the x offset expression for the input image position", OFFSET(x_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, 0, FLAGS },
+    { "y",      "set the y offset expression for the input image position", OFFSET(y_expr), AV_OPT_TYPE_STRING, {.str = "0"}, 0, 0, FLAGS },
     { "color",  "set the color of the padded area border", OFFSET(rgba_color), AV_OPT_TYPE_COLOR, {.str = "black"}, .flags = FLAGS },
     { "eval",   "specify when to evaluate expressions",    OFFSET(eval_mode), AV_OPT_TYPE_INT, {.i64 = EVAL_MODE_INIT}, 0, EVAL_MODE_NB-1, FLAGS, "eval" },
          { "init",  "eval expressions once during initialization", 0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_INIT},  .flags = FLAGS, .unit = "eval" },
          { "frame", "eval expressions during initialization and per-frame", 0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_FRAME}, .flags = FLAGS, .unit = "eval" },
+    { "aspect",  "pad to fit an aspect instead of a resolution", OFFSET(aspect), AV_OPT_TYPE_RATIONAL, {.dbl = 0}, 0, DBL_MAX, FLAGS },
     { NULL }
 };
 

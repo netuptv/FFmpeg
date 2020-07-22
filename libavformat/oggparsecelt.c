@@ -37,6 +37,7 @@ static int celt_header(AVFormatContext *s, int idx)
     AVStream *st = s->streams[idx];
     struct oggcelt_private *priv = os->private;
     uint8_t *p = os->buf + os->pstart;
+    int ret;
 
     if (os->psize == 60 &&
         !memcmp(p, ff_celt_codec.magic, ff_celt_codec.magicsize)) {
@@ -48,9 +49,10 @@ static int celt_header(AVFormatContext *s, int idx)
         priv = av_malloc(sizeof(struct oggcelt_private));
         if (!priv)
             return AVERROR(ENOMEM);
-        if (ff_alloc_extradata(st->codecpar, 2 * sizeof(uint32_t)) < 0) {
+        ret = ff_alloc_extradata(st->codecpar, 2 * sizeof(uint32_t));
+        if (ret < 0) {
             av_free(priv);
-            return AVERROR(ENOMEM);
+            return ret;
         }
         version          = AV_RL32(p + 28);
         /* unused header size field skipped */
@@ -65,9 +67,14 @@ static int celt_header(AVFormatContext *s, int idx)
         st->codecpar->channels       = nb_channels;
         if (sample_rate)
             avpriv_set_pts_info(st, 64, 1, sample_rate);
-        priv->extra_headers_left  = 1 + extra_headers;
-        av_free(os->private);
+
+        if (os->private) {
+            av_free(priv);
+            priv = os->private;
+        }
         os->private = priv;
+        priv->extra_headers_left  = 1 + extra_headers;
+
         AV_WL32(st->codecpar->extradata + 0, overlap);
         AV_WL32(st->codecpar->extradata + 4, version);
         return 1;

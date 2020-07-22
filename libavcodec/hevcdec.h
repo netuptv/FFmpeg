@@ -36,6 +36,7 @@
 #include "h2645_parse.h"
 #include "hevc.h"
 #include "hevc_ps.h"
+#include "hevc_sei.h"
 #include "hevcdsp.h"
 #include "internal.h"
 #include "thread.h"
@@ -229,6 +230,7 @@ enum ScanType {
 
 typedef struct LongTermRPS {
     int     poc[32];
+    uint8_t poc_msb_present[32];
     uint8_t used[32];
     uint8_t nb_refs;
 } LongTermRPS;
@@ -400,8 +402,6 @@ typedef struct HEVCFrame {
     int poc;
     struct HEVCFrame *collocated_ref;
 
-    HEVCWindow window;
-
     AVBufferRef *tab_mvf_buf;
     AVBufferRef *rpl_tab_buf;
     AVBufferRef *rpl_buf;
@@ -448,7 +448,7 @@ typedef struct HEVCLocalContext {
     DECLARE_ALIGNED(32, uint8_t, edge_emu_buffer)[(MAX_PB_SIZE + 7) * EDGE_EMU_BUFFER_STRIDE * 2];
     /* The extended size between the new edge emu buffer is abused by SAO */
     DECLARE_ALIGNED(32, uint8_t, edge_emu_buffer2)[(MAX_PB_SIZE + 7) * EDGE_EMU_BUFFER_STRIDE * 2];
-    DECLARE_ALIGNED(32, int16_t, tmp [MAX_PB_SIZE * MAX_PB_SIZE]);
+    DECLARE_ALIGNED(32, int16_t, tmp)[MAX_PB_SIZE * MAX_PB_SIZE];
 
     int ct_depth;
     CodingUnit cu;
@@ -490,6 +490,8 @@ typedef struct HEVCContext {
     uint8_t *sao_pixel_buffer_v[3];
 
     HEVCParamSets ps;
+    HEVCSEI sei;
+    struct AVMD5 *md5_ctx;
 
     AVBufferPool *tab_mvf_pool;
     AVBufferPool *rpl_tab_pool;
@@ -512,6 +514,7 @@ typedef struct HEVCContext {
     int max_ra;
     int bs_width;
     int bs_height;
+    int overlap;
 
     int is_decoded;
     int no_rasl_output_flag;
@@ -558,47 +561,14 @@ typedef struct HEVCContext {
     // type of the first VCL NAL of the current frame
     enum HEVCNALUnitType first_nal_type;
 
-    // for checking the frame checksums
-    struct AVMD5 *md5_ctx;
-    uint8_t       md5[3][16];
-    uint8_t is_md5;
-
     uint8_t context_initialized;
-    uint8_t is_nalff;       ///< this flag is != 0 if bitstream is encapsulated
+    int is_nalff;           ///< this flag is != 0 if bitstream is encapsulated
                             ///< as a format defined in 14496-15
     int apply_defdispwin;
 
-    int active_seq_parameter_set_id;
-
     int nal_length_size;    ///< Number of bytes used for nal length (1, 2 or 4)
     int nuh_layer_id;
-
-    /** frame packing arrangement variables */
-    int sei_frame_packing_present;
-    int frame_packing_arrangement_type;
-    int content_interpretation_type;
-    int quincunx_subsampling;
-
-    /** display orientation */
-    int sei_display_orientation_present;
-    int sei_anticlockwise_rotation;
-    int sei_hflip, sei_vflip;
-
-    int picture_struct;
-
-    uint8_t* a53_caption;
-    int a53_caption_size;
-
-    /** mastering display */
-    int sei_mastering_display_info_present;
-    uint16_t display_primaries[3][2];
-    uint16_t white_point[2];
-    uint32_t max_mastering_luminance;
-    uint32_t min_mastering_luminance;
-
 } HEVCContext;
-
-int ff_hevc_decode_nal_sei(HEVCContext *s);
 
 /**
  * Mark all frames in DPB as unused for reference.
@@ -609,11 +579,6 @@ void ff_hevc_clear_refs(HEVCContext *s);
  * Drop all frames currently in DPB.
  */
 void ff_hevc_flush_dpb(HEVCContext *s);
-
-/**
- * Compute POC of the current frame and return it.
- */
-int ff_hevc_compute_poc(HEVCContext *s, int poc_lsb);
 
 RefPicList *ff_hevc_get_ref_list(HEVCContext *s, HEVCFrame *frame,
                                  int x0, int y0);
@@ -629,7 +594,7 @@ int ff_hevc_frame_rps(HEVCContext *s);
 int ff_hevc_slice_rpl(HEVCContext *s);
 
 void ff_hevc_save_states(HEVCContext *s, int ctb_addr_ts);
-void ff_hevc_cabac_init(HEVCContext *s, int ctb_addr_ts);
+int ff_hevc_cabac_init(HEVCContext *s, int ctb_addr_ts);
 int ff_hevc_sao_merge_flag_decode(HEVCContext *s);
 int ff_hevc_sao_type_idx_decode(HEVCContext *s);
 int ff_hevc_sao_band_position_decode(HEVCContext *s);
@@ -664,9 +629,26 @@ int ff_hevc_res_scale_sign_flag(HEVCContext *s, int idx);
 /**
  * Get the number of candidate references for the current frame.
  */
-int ff_hevc_frame_nb_refs(HEVCContext *s);
+int ff_hevc_frame_nb_refs(const HEVCContext *s);
 
 int ff_hevc_set_new_ref(HEVCContext *s, AVFrame **frame, int poc);
+
+static av_always_inline int ff_hevc_nal_is_nonref(enum HEVCNALUnitType type)
+{
+    switch (type) {
+    case HEVC_NAL_TRAIL_N:
+    case HEVC_NAL_TSA_N:
+    case HEVC_NAL_STSA_N:
+    case HEVC_NAL_RADL_N:
+    case HEVC_NAL_RASL_N:
+    case HEVC_NAL_VCL_N10:
+    case HEVC_NAL_VCL_N12:
+    case HEVC_NAL_VCL_N14:
+        return 1;
+    default: break;
+    }
+    return 0;
+}
 
 /**
  * Find next frame in output order and put a reference to it in frame.
@@ -702,15 +684,6 @@ void ff_hevc_hls_residual_coding(HEVCContext *s, int x0, int y0,
                                  int c_idx);
 
 void ff_hevc_hls_mvd_coding(HEVCContext *s, int x0, int y0, int log2_cb_size);
-
-/**
- * Reset SEI values that are stored on the Context.
- * e.g. Caption data that was extracted during NAL
- * parsing.
- *
- * @param s HEVCContext.
- */
-void ff_hevc_reset_sei(HEVCContext *s);
 
 extern const uint8_t ff_hevc_qpel_extra_before[4];
 extern const uint8_t ff_hevc_qpel_extra_after[4];

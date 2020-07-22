@@ -25,23 +25,6 @@
 //                            const uint8_t *ref, ptrdiff_t ref_stride,
 //                            int h, int mx, int my);
 
-function ff_vp9_copy64_aarch64, export=1
-1:
-        ldp             x5,  x6,  [x2]
-        ldp             x7,  x8,  [x2, #16]
-        stp             x5,  x6,  [x0]
-        ldp             x9,  x10, [x2, #32]
-        stp             x7,  x8,  [x0, #16]
-        subs            w4,  w4,  #1
-        ldp             x11, x12, [x2, #48]
-        stp             x9,  x10, [x0, #32]
-        stp             x11, x12, [x0, #48]
-        add             x2,  x2,  x3
-        add             x0,  x0,  x1
-        b.ne            1b
-        ret
-endfunc
-
 function ff_vp9_avg64_neon, export=1
         mov             x5,  x0
 1:
@@ -60,19 +43,6 @@ function ff_vp9_avg64_neon, export=1
         urhadd          v18.16b, v18.16b, v22.16b
         urhadd          v19.16b, v19.16b, v23.16b
         st1             {v16.16b, v17.16b, v18.16b, v19.16b}, [x5], x1
-        b.ne            1b
-        ret
-endfunc
-
-function ff_vp9_copy32_aarch64, export=1
-1:
-        ldp             x5,  x6,  [x2]
-        ldp             x7,  x8,  [x2, #16]
-        stp             x5,  x6,  [x0]
-        subs            w4,  w4,  #1
-        stp             x7,  x8,  [x0, #16]
-        add             x2,  x2,  x3
-        add             x0,  x0,  x1
         b.ne            1b
         ret
 endfunc
@@ -341,7 +311,7 @@ function \type\()_8tap_\size\()h_\idx1\idx2
         subs            x9,  x9,  #16
         st1             {v1.16b},  [x0], #16
         st1             {v24.16b}, [x6], #16
-        beq             3f
+        b.eq            3f
         mov             v4.16b,  v6.16b
         mov             v16.16b, v18.16b
         ld1             {v6.16b},  [x2], #16
@@ -388,10 +358,10 @@ function ff_vp9_\type\()_\filter\()\size\()_h_neon, export=1
         add             x9,  x6,  w5, uxtw #4
         mov             x5,  #\size
 .if \size >= 16
-        bge             \type\()_8tap_16h_34
+        b.ge            \type\()_8tap_16h_34
         b               \type\()_8tap_16h_43
 .else
-        bge             \type\()_8tap_\size\()h_34
+        b.ge            \type\()_8tap_\size\()h_34
         b               \type\()_8tap_\size\()h_43
 .endif
 endfunc
