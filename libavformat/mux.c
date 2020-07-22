@@ -1108,6 +1108,12 @@ static int interleaved_write_packet(AVFormatContext *s, AVPacket *pkt, int flush
         if (ret < 0)
             return ret;
     }
+    if (ret>=0 && flush && s->oformat->flags & AVFMT_ALLOW_FLUSH) {
+        av_log(s, AV_LOG_INFO, "[tmp] av_interleaved_write_frame flushing buffer\n");
+        ret = write_packet(s, NULL);
+    }
+fail:
+    av_packet_unref(pkt);
 }
 
 static int write_packet_common(AVFormatContext *s, AVStream *st, AVPacket *pkt, int interleaved)

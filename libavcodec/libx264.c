@@ -308,7 +308,7 @@ static int X264_frame(AVCodecContext *ctx, AVPacket *pkt, const AVFrame *frame,
 #if X264_BUILD >= 153
     bit_depth = x4->params.i_bitdepth;
 #else
-    bit_depth = x264_bit_depth;
+    bit_depth = X264_BIT_DEPTH;
 #endif
     if (bit_depth > 8)
         x4->pic.img.i_csp |= X264_CSP_HIGH_DEPTH;
@@ -1026,7 +1026,7 @@ static const enum AVPixelFormat pix_fmts_8bit_rgb[] = {
 static av_cold void X264_init_static(AVCodec *codec)
 {
 #if X264_BUILD < 153
-    if (x264_bit_depth == 8)
+    if (X264_BIT_DEPTH == 8)
         codec->pix_fmts = pix_fmts_8bit;
     else if (X264_BIT_DEPTH == 9)
         codec->pix_fmts = pix_fmts_9bit;
