@@ -1093,10 +1093,9 @@ static int check_bitstream(AVFormatContext *s, AVStream *st, AVPacket *pkt)
 
 static int interleaved_write_packet(AVFormatContext *s, AVPacket *pkt, int flush)
 {
-    int ret;
     for (;; ) {
         AVPacket opkt;
-        ret = interleave_packet(s, &opkt, pkt, flush);
+        int ret = interleave_packet(s, &opkt, pkt, flush);
         if (ret <= 0)
             return ret;
 
@@ -1109,12 +1108,6 @@ static int interleaved_write_packet(AVFormatContext *s, AVPacket *pkt, int flush
         if (ret < 0)
             return ret;
     }
-    if (ret >= 0 && flush && s->oformat->flags & AVFMT_ALLOW_FLUSH) {
-        av_log(s, AV_LOG_INFO, "[tmp] av_interleaved_write_frame flushing buffer\n");
-        ret = write_packet(s, NULL);
-    }
-    av_packet_unref(pkt);
-    return ret;
 }
 
 static int write_packet_common(AVFormatContext *s, AVStream *st, AVPacket *pkt, int interleaved)
@@ -1243,16 +1236,19 @@ fail:
 int av_interleaved_write_frame(AVFormatContext *s, AVPacket *pkt)
 {
     int ret;
-
     if (pkt) {
         ret = write_packets_common(s, pkt, 1/*interleaved*/);
         if (ret < 0)
             av_packet_unref(pkt);
-        return ret;
     } else {
         av_log(s, AV_LOG_TRACE, "av_interleaved_write_frame FLUSH\n");
-        return interleaved_write_packet(s, NULL, 1/*flush*/);
+        ret = interleaved_write_packet(s, NULL, 1/*flush*/);
+        if (ret >= 0 && s->oformat->flags & AVFMT_ALLOW_FLUSH) {
+            av_log(s, AV_LOG_INFO, "[tmp] av_interleaved_write_frame flushing buffer\n");
+            ret = s->oformat->write_packet(s, NULL);
+        }
     }
+    return ret;
 }
 
 int av_write_trailer(AVFormatContext *s)
