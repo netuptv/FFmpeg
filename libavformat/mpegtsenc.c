@@ -872,18 +872,6 @@ static int64_t get_pcr(const MpegTSWrite *ts, AVIOContext *pb)
            ts->first_pcr;
 }
 
-static void mpegts_prefix_m2ts_header(AVFormatContext *s)
-{
-    MpegTSWrite *ts = s->priv_data;
-    if (ts->m2ts_mode) {
-        int64_t pcr = get_pcr(s->priv_data, s->pb);
-        uint32_t tp_extra_header = pcr % 0x3fffffff;
-        tp_extra_header = AV_RB32(&tp_extra_header);
-        avio_write(s->pb, (unsigned char *) &tp_extra_header,
-                   sizeof(tp_extra_header));
-    }
-}
-
 static void write_packet(AVFormatContext *s, const uint8_t *packet)
 {
     MpegTSWrite *ts = s->priv_data;
@@ -2044,7 +2032,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     MpegTSWrite *ts = s->priv_data;
     uint8_t buf[TS_PACKET_SIZE];
     uint8_t *q;
-    int val, len, header_len, write_pcr = 0, flags;
+    int val, len, header_len, write_pcr = 0;
     const int is_dvb_subtitle = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_SUBTITLE);
     const int is_dvb_teletext = (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) && (st->codecpar->codec_id == AV_CODEC_ID_DVB_TELETEXT);
     const int tsi_active = ts->tsi.is_active;
@@ -2068,7 +2056,6 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
     if (is_dvb_subtitle)
       ++payload_size;
 
-    is_start = 1;
     while (payload_size > 0) {
         if (!tsi_active) { // keep ffmpeg indention in this block
         int64_t pcr = AV_NOPTS_VALUE;
@@ -2123,17 +2110,6 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
                 write_pcr = 1;
             }
         }
-
-        if (ts->mux_rate > 1 && dts != AV_NOPTS_VALUE &&
-            (dts - get_pcr(ts, s->pb) / 300) > delay) {
-            /* pcr insert gets priority over null packet insert */
-            if (write_pcr)
-                mpegts_insert_pcr_only(s, st);
-            else
-                mpegts_insert_null_packet(s);
-            /* recalculate write_pcr and possibly retransmit si_info */
-            continue;
-        }
         } // if (!tsi_active)
 
         /* prepare packet header */
@@ -2169,12 +2145,6 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
             q = get_ts_payload_start(buf);
 
             if (!tsi_active) { // keep ffmpeg indention in this block
-            // add 11, pcr references the last byte of program clock reference base
-            if (ts->mux_rate > 1)
-                pcr = get_pcr(ts, s->pb);
-            else
-                pcr = (dts - delay) * 300;
-
             if (dts != AV_NOPTS_VALUE && dts < pcr / 300)
                 av_log(s, AV_LOG_WARNING, "dts < pcr, TS is invalid\n");
             } // if (!tsi_active)
@@ -2353,8 +2323,7 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
 
         payload      += len;
         payload_size -= len;
-        mpegts_prefix_m2ts_header(s);
-        avio_write(s->pb, buf, TS_PACKET_SIZE);
+        write_packet(s, buf);
 
         if (tsi_active) { // send only one ts packet in tsi mode
             ts_st->tsi.packet_consumed_bytes += is_dvb_subtitle && payload_size<=0 ? len-1 : len;
@@ -2672,21 +2641,6 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
         if (!tmp)
             av_free(data);
         return 0;
-    }
-
-    if (pkt->dts != AV_NOPTS_VALUE) {
-        int i;
-        for(i=0; i<s->nb_streams; i++) {
-            AVStream *st2 = s->streams[i];
-            MpegTSWriteStream *ts_st2 = st2->priv_data;
-            if (   ts_st2->payload_size
-               && (ts_st2->payload_dts == AV_NOPTS_VALUE || dts - ts_st2->payload_dts > delay/2)) {
-                mpegts_write_pes(s, st2, ts_st2->payload, ts_st2->payload_size,
-                                 ts_st2->payload_pts, ts_st2->payload_dts,
-                                 ts_st2->payload_flags & AV_PKT_FLAG_KEY, stream_id);
-                ts_st2->payload_size = 0;
-            }
-        }
     }
 
     if (ts_st->payload_size && (ts_st->payload_size + size > ts->pes_payload_size ||
