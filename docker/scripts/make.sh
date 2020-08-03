@@ -44,6 +44,8 @@ ${SRC_DIR}/configure \
     --disable-doc \
     --enable-libzvbi \
     --enable-shared \
+    --enable-libxml2 \
+    --enable-demuxer=dash \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers install-progs
 
@@ -58,6 +60,8 @@ ${SRC_DIR}/configure \
     --disable-doc \
     --enable-libzvbi \
     --enable-shared \
+    --enable-libxml2 \
+    --enable-demuxer=dash \
     --disable-nvenc \
     --enable-libx264 \
     --enable-gpl \
