@@ -52,18 +52,12 @@ make -j $(nproc) install-libs install-headers install-progs
 cd ${BUILD_X264_DIR}
 ${SRC_DIR}/configure \
     --prefix=${OUT_X264_DIR} \
-    --enable-pic \
-    --enable-libmp3lame \
     --disable-vaapi \
-    --disable-programs \
-    --enable-ffprobe \
-    --disable-doc \
-    --enable-libzvbi \
-    --enable-shared \
-    --enable-libxml2 \
-    --enable-demuxer=dash \
     --disable-nvenc \
+    --disable-programs \
+    --disable-doc \
     --enable-libx264 \
+    --enable-libx265 \
     --enable-gpl \
     ${DEBUG}
 make -j $(nproc) install-libs install-headers
