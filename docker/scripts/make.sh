@@ -52,10 +52,16 @@ make -j $(nproc) install-libs install-headers install-progs
 cd ${BUILD_X264_DIR}
 ${SRC_DIR}/configure \
     --prefix=${OUT_X264_DIR} \
-    --disable-vaapi \
-    --disable-nvenc \
     --disable-programs \
     --disable-doc \
+    --disable-nvenc \
+    --disable-vaapi \
+    --disable-everything \
+    --enable-decoders \
+    --enable-filter=yadif \
+    --enable-encoders \
+    --enable-swscale \
+    --enable-swresample \
     --enable-libx264 \
     --enable-libx265 \
     --enable-gpl \
