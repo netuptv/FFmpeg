@@ -33,11 +33,15 @@ catchError {
             dir('jenkins/out/ffmpeg_x264') {
                 sh 'tar czf artifacts.tgz include lib'
             }
+            dir('jenkins/out/srt') {
+                sh 'tar czf artifacts.tgz include lib'
+            }
             archiveArtifacts([
                 'jenkins/out/ffmpeg/artifacts.tgz',
                 'jenkins/out/ffmpeg_x264/artifacts.tgz',
                 'jenkins/out/ffmpeg/build.info',
-                'jenkins/out/ffmpeg_x264/build.info'].join(','))
+                'jenkins/out/ffmpeg_x264/build.info',
+                'jenkins/out/srt/artifacts.tgz'].join(','))
         }
     }
 }
