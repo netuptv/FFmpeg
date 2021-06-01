@@ -60,7 +60,9 @@ PKG_CONFIG_PATH="${OUT_SRT_DIR}/lib/pkgconfig" ${SRC_DIR}/configure \
     --disable-vaapi \
     --enable-openssl \
     --disable-programs \
+    --disable-ffmpeg \
     --enable-ffprobe \
+    --disable-ffplay \
     --disable-doc \
     --enable-libzvbi \
     --enable-shared \
