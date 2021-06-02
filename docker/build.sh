@@ -24,7 +24,7 @@ RUN apt-get update && \
     apt-get install --no-install-recommends --assume-yes \
         gcc make libssl-dev libc6-dev yasm libmp3lame-dev pkg-config \
         libzvbi-dev libx264-dev libx265-dev libxml2-dev git g++ tcl cmake \
-        ca-certificates libsdl2-dev && \
+        ca-certificates && \
     apt-get install --no-install-recommends --assume-yes ccache && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
